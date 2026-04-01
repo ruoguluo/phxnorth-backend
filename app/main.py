@@ -89,9 +89,9 @@ def create_application() -> FastAPI:
         """Health check endpoint."""
         return {"status": "healthy"}
     
-    # Include API router (will be created in Task 8)
-    # from app.api.router import api_router
-    # app.include_router(api_router, prefix=settings.api_prefix)
+    # Include API router
+    from app.api.v1.router import api_router
+    app.include_router(api_router, prefix=settings.api_prefix)
     
     return app
 
