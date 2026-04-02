@@ -17,6 +17,16 @@ from app.models.career import (
     SeniorityLevel,
     TurningPointType,
 )
+from app.models.disc import (
+    DISCProfile,
+    DISCTrait,
+    PreferenceProfile,
+    RedFlagEvent,
+    RiskAssessment,
+    RiskCategory,
+    SeverityLevel,
+    ShiftType,
+)
 from app.models.user import User
 
 __all__ = [
@@ -35,4 +45,12 @@ __all__ = [
     "BehavioralMetrics",
     "EventType",
     "ClientType",
+    "DISCProfile",
+    "DISCTrait",
+    "PreferenceProfile",
+    "RiskAssessment",
+    "RedFlagEvent",
+    "RiskCategory",
+    "SeverityLevel",
+    "ShiftType",
 ]
