@@ -1,0 +1,168 @@
+# PhxNorth Backend - Continuous Integration
+# Runs on every push to main and on pull requests.
+# Jobs: lint (code quality), test (pytest), build (Docker image verification)
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.11"
+  POETRY_VERSION: "1.7.1"
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Lint - Code quality checks via pre-commit hooks (black, isort, flake8, mypy)
+  # ---------------------------------------------------------------------------
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Cache pre-commit hooks
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pre-commit
+          key: pre-commit-${{ hashFiles('.pre-commit-config.yaml') }}
+          restore-keys: |
+            pre-commit-
+
+      - name: Install pre-commit
+        run: pip install pre-commit
+
+      - name: Run pre-commit hooks
+        run: pre-commit run --all-files --show-diff-on-failure
+
+  # ---------------------------------------------------------------------------
+  # Test - Run pytest suite
+  # ---------------------------------------------------------------------------
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: timescale/timescaledb:latest-pg16
+        env:
+          POSTGRES_USER: phxnorth
+          POSTGRES_PASSWORD: phxnorth
+          POSTGRES_DB: phxnorth_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U phxnorth -d phxnorth_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+          --health-start-period 10s
+
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      DATABASE_URL: postgresql+asyncpg://phxnorth:phxnorth@localhost:5432/phxnorth_test
+      REDIS_URL: redis://localhost:6379/0
+      ENVIRONMENT: test
+      SECRET_KEY: ci-test-secret-key-not-for-production
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install Poetry
+        run: pip install poetry==${{ env.POETRY_VERSION }}
+
+      - name: Cache Poetry virtualenv
+        uses: actions/cache@v4
+        with:
+          path: .venv
+          key: venv-${{ runner.os }}-py${{ env.PYTHON_VERSION }}-${{ hashFiles('poetry.lock') }}
+          restore-keys: |
+            venv-${{ runner.os }}-py${{ env.PYTHON_VERSION }}-
+
+      - name: Install dependencies
+        run: |
+          poetry config virtualenvs.in-project true
+          poetry install --with dev --no-interaction
+
+      - name: Run tests
+        run: poetry run pytest --tb=short -q
+
+  # ---------------------------------------------------------------------------
+  # Build - Verify production Docker image builds and starts
+  # ---------------------------------------------------------------------------
+  build:
+    name: Build Docker Image
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build production image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          target: production
+          push: false
+          load: true
+          tags: phxnorth-backend:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Verify image starts and responds
+        run: |
+          # Start the container in the background
+          docker run -d --name phxnorth-ci \
+            -p 8000:8000 \
+            -e ENVIRONMENT=test \
+            -e DATABASE_URL=sqlite+aiosqlite:///test.db \
+            -e SECRET_KEY=ci-test-key \
+            phxnorth-backend:ci
+
+          # Wait for the container to be ready (up to 30s)
+          echo "Waiting for container to start..."
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:8000/api/v1/health > /dev/null 2>&1; then
+              echo "Health check passed on attempt $i"
+              exit 0
+            fi
+            sleep 1
+          done
+
+          # If we get here, health check failed
+          echo "Health check failed after 30 seconds"
+          docker logs phxnorth-ci
+          exit 1
+
+      - name: Cleanup
+        if: always()
+        run: docker rm -f phxnorth-ci 2>/dev/null || true

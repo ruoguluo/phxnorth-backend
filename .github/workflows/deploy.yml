@@ -1,0 +1,111 @@
+# PhxNorth Backend - Continuous Deployment
+# Deploys to production server on push to main (after CI passes).
+#
+# Required GitHub Secrets:
+#   SSH_HOST          - Production server hostname or IP
+#   SSH_USER          - SSH username on the server
+#   SSH_PRIVATE_KEY   - Private SSH key for authentication
+#   DOCKER_REGISTRY   - (Optional) Container registry URL for registry-based deploys
+#
+# Required server-side environment:
+#   - Docker and Docker Compose installed
+#   - Project cloned at ~/phxnorth-backend (or update DEPLOY_PATH)
+#   - .env.production configured with production secrets
+
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:  # Allow manual deployment
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false  # Never cancel an in-progress deploy
+
+env:
+  DEPLOY_PATH: ~/phxnorth-backend
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Gate - Wait for CI to pass before deploying
+  # ---------------------------------------------------------------------------
+  ci-check:
+    name: Wait for CI
+    runs-on: ubuntu-latest
+    steps:
+      - name: Wait for CI workflow
+        uses: lewagon/wait-on-check-action@v1.3.4
+        with:
+          ref: ${{ github.sha }}
+          running-workflow-name: "Wait for CI"
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          check-regexp: "^(Lint|Test|Build Docker Image)$"
+          wait-interval: 15
+
+  # ---------------------------------------------------------------------------
+  # Deploy - SSH into production and update
+  # ---------------------------------------------------------------------------
+  deploy:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs: ci-check
+    environment: production  # Uses GitHub environment for protection rules
+    steps:
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script_stop: true
+          script: |
+            set -euo pipefail
+
+            echo "=== Deploying PhxNorth Backend ==="
+            cd ${{ env.DEPLOY_PATH }}
+
+            # Pull latest code
+            echo "Pulling latest changes..."
+            git fetch origin main
+            git reset --hard origin/main
+
+            # Build and restart services
+            echo "Building and restarting services..."
+            docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+
+            # Wait for services to be healthy
+            echo "Waiting for health check..."
+            sleep 10
+
+            # Verify the API is responding
+            for i in $(seq 1 30); do
+              if curl -sf http://localhost:8000/api/v1/health > /dev/null 2>&1; then
+                echo "Deployment successful - health check passed on attempt $i"
+                exit 0
+              fi
+              echo "Attempt $i/30 - waiting..."
+              sleep 2
+            done
+
+            echo "ERROR: Health check failed after 60 seconds"
+            echo "=== Container logs ==="
+            docker compose -f docker-compose.yml -f docker-compose.prod.yml logs --tail=50 api
+            exit 1
+
+      - name: Deployment summary
+        if: success()
+        run: |
+          echo "### Deployment Successful" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Commit:** \`${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Branch:** main" >> $GITHUB_STEP_SUMMARY
+          echo "- **Deployed by:** ${{ github.actor }}" >> $GITHUB_STEP_SUMMARY
+
+      - name: Notify on failure
+        if: failure()
+        run: |
+          echo "### Deployment FAILED" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Commit:** \`${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Check the deploy logs for details.**" >> $GITHUB_STEP_SUMMARY
