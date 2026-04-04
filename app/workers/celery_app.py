@@ -7,6 +7,7 @@ Tasks are routed to dedicated queues per worker domain.
 from celery import Celery
 
 from app.config import get_settings
+from app.workers.schedule import CELERYBEAT_SCHEDULE
 
 settings = get_settings()
 
@@ -40,6 +41,8 @@ celery_app.conf.update(
     task_default_queue="default",
     task_default_exchange="default",
     task_default_routing_key="default",
+    # Beat schedule
+    beat_schedule=CELERYBEAT_SCHEDULE,
 )
 
 # Auto-discover tasks in worker modules
