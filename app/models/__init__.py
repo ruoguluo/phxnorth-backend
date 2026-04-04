@@ -28,6 +28,7 @@ from app.models.disc import (
     ShiftType,
 )
 from app.models.user import User
+from app.models.webhook import Webhook
 
 __all__ = [
     "Base",
@@ -53,4 +54,5 @@ __all__ = [
     "RiskCategory",
     "SeverityLevel",
     "ShiftType",
+    "Webhook",
 ]
