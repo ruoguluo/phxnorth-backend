@@ -29,6 +29,7 @@ from app.models.disc import (
 )
 from app.models.user import User
 from app.models.webhook import Webhook
+from app.models.webhook_delivery import WebhookDelivery
 
 __all__ = [
     "Base",
@@ -55,4 +56,5 @@ __all__ = [
     "SeverityLevel",
     "ShiftType",
     "Webhook",
+    "WebhookDelivery",
 ]
