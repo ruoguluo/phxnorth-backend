@@ -3,10 +3,12 @@
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 
+import structlog
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import get_settings
+from app.kafka.producer import KafkaProducerService
 from app.core.exceptions import (
     AuthenticationException,
     AuthorizationException,
@@ -23,6 +25,8 @@ from app.core.exceptions import (
 )
 from app.logging_config import setup_logging
 
+logger = structlog.get_logger(__name__)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
@@ -34,10 +38,26 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Initialize database connections, etc.
     # TODO: Add database initialization when Task 6 is complete
     
+    # Start Kafka producer (optional — gracefully degrade if unavailable)
+    kafka_producer: KafkaProducerService | None = None
+    try:
+        kafka_producer = KafkaProducerService()
+        await kafka_producer.start()
+        app.state.kafka_producer = kafka_producer
+        logger.info("kafka_producer_attached_to_app")
+    except Exception:
+        logger.warning(
+            "kafka_producer_unavailable",
+            msg="Kafka producer failed to start; endpoints will use synchronous fallback.",
+        )
+        app.state.kafka_producer = None
+    
     yield
     
     # Shutdown
-    # TODO: Cleanup resources when needed
+    if kafka_producer is not None:
+        await kafka_producer.stop()
+    # TODO: Cleanup other resources when needed
 
 
 def create_application() -> FastAPI:

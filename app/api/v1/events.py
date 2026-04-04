@@ -6,21 +6,27 @@ into the DISC signal extraction pipeline.
 
 from __future__ import annotations
 
-import logging
 import uuid
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
+import structlog
 from fastapi import APIRouter, Depends, status
 
+from app.api.deps import get_kafka_producer
 from app.api.v1.schemas.events import (
     BatchEventsIn,
     EventIn,
     EventIngestionResponse,
     RejectedEventDetail,
 )
+from app.kafka.schemas import BehavioralEventMessage
+from app.kafka.topics import KafkaTopic
 from app.services.signal_extractor.validation.event_validator import validate_event
 
-logger = logging.getLogger(__name__)
+if TYPE_CHECKING:
+    from app.kafka.producer import KafkaProducerService
+
+logger = structlog.get_logger(__name__)
 
 router = APIRouter(tags=["events"])
 
@@ -64,14 +70,59 @@ def _process_single_event(
             errors=result["errors"],
         )
 
-    # TODO: Persist event / publish to Kafka (Phase 7)
     logger.info(
-        "Accepted event %s (type=%s, user=%s)",
-        event_id,
-        event.event_type,
-        event.user_id,
+        "event_accepted",
+        event_id=event_id,
+        event_type=event.event_type,
+        user_id=str(event.user_id),
     )
     return event_id, None
+
+
+async def _publish_events_to_kafka(
+    producer: KafkaProducerService | None,
+    events: list[EventIn],
+    event_ids: list[str],
+) -> None:
+    """Best-effort publish of validated events to Kafka.
+
+    If the producer is ``None`` or sending fails, the events are silently
+    accepted (they were already validated).  A warning is logged on failure
+    so operators can detect Kafka issues.
+    """
+    if producer is None or not events:
+        return
+
+    messages = []
+    for event, eid in zip(events, event_ids):
+        msg = BehavioralEventMessage(
+            user_id=str(event.user_id),
+            session_id=str(event.session_id) if event.session_id else "",
+            event_type=event.event_type,
+            payload=event.payload,
+            latency_ms=event.latency_ms,
+            client_type=event.client_type,
+            event_id=eid,
+        )
+        messages.append(msg.to_dict())
+
+    try:
+        await producer.send_batch(
+            topic=KafkaTopic.RAW_BEHAVIORAL_EVENTS.value,
+            messages=messages,
+        )
+        logger.info(
+            "events_published_to_kafka",
+            count=len(messages),
+            topic=KafkaTopic.RAW_BEHAVIORAL_EVENTS.value,
+        )
+    except Exception:
+        logger.warning(
+            "events_kafka_publish_failed",
+            count=len(messages),
+            topic=KafkaTopic.RAW_BEHAVIORAL_EVENTS.value,
+            exc_info=True,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -92,8 +143,14 @@ def _process_single_event(
 async def ingest_event(
     event: EventIn,
     current_user: dict[str, Any] = Depends(_require_auth),
+    kafka_producer: KafkaProducerService | None = Depends(get_kafka_producer),
 ) -> EventIngestionResponse:
-    """Ingest a single behavioral event."""
+    """Ingest a single behavioral event.
+
+    If a Kafka producer is available the validated event is published to
+    ``raw.behavioral.events``.  Otherwise the event is accepted
+    synchronously (logged only until downstream persistence is wired).
+    """
     event_id, rejected = _process_single_event(event)
 
     if rejected is not None:
@@ -103,6 +160,9 @@ async def ingest_event(
             event_ids=[],
             rejected_details=[rejected],
         )
+
+    # Publish to Kafka (best-effort; fall back to sync acceptance)
+    await _publish_events_to_kafka(kafka_producer, [event], [event_id])  # type: ignore[arg-type]
 
     return EventIngestionResponse(
         accepted=1,
@@ -124,9 +184,15 @@ async def ingest_event(
 async def ingest_batch(
     body: BatchEventsIn,
     current_user: dict[str, Any] = Depends(_require_auth),
+    kafka_producer: KafkaProducerService | None = Depends(get_kafka_producer),
 ) -> EventIngestionResponse:
-    """Ingest a batch of behavioral events (max 100)."""
+    """Ingest a batch of behavioral events (max 100).
+
+    Validated events are published to Kafka when a producer is available,
+    otherwise they are accepted synchronously.
+    """
     accepted_ids: list[str] = []
+    accepted_events: list[EventIn] = []
     rejected_details: list[RejectedEventDetail] = []
 
     for idx, event in enumerate(body.events):
@@ -135,11 +201,15 @@ async def ingest_batch(
             rejected_details.append(rejected)
         else:
             accepted_ids.append(event_id)  # type: ignore[arg-type]
+            accepted_events.append(event)
+
+    # Publish accepted events to Kafka
+    await _publish_events_to_kafka(kafka_producer, accepted_events, accepted_ids)
 
     logger.info(
-        "Batch ingestion complete: %d accepted, %d rejected",
-        len(accepted_ids),
-        len(rejected_details),
+        "batch_ingestion_complete",
+        accepted=len(accepted_ids),
+        rejected=len(rejected_details),
     )
 
     return EventIngestionResponse(

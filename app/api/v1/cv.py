@@ -11,11 +11,14 @@ from uuid import UUID, uuid4
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, status
 
-from app.api.deps import get_current_user
+from app.api.deps import get_current_user, get_kafka_producer
 from app.api.v1.schemas.cv import CVStatusResponse, CVTextRequest, CVUploadResponse
+from app.kafka.schemas import CVUploadMessage
+from app.kafka.topics import KafkaTopic
 from app.services.cv_parser.parser import parse_cv
 
 if TYPE_CHECKING:
+    from app.kafka.producer import KafkaProducerService
     from app.models.user import User
 
 logger = structlog.get_logger(__name__)
@@ -40,12 +43,18 @@ async def upload_cv_file(
     user_id: UUID,
     file: UploadFile,
     _current_user: User = Depends(get_current_user),
+    kafka_producer: KafkaProducerService | None = Depends(get_kafka_producer),
 ) -> CVUploadResponse:
     """Accept a CV file upload, parse it, and store the result.
+
+    If a Kafka producer is available the file metadata is published to
+    ``raw.cv.uploads`` and a 202 is returned immediately.  Otherwise the
+    endpoint falls back to synchronous in-process parsing.
 
     Args:
         user_id: Target user ID from the path.
         file: Uploaded PDF or DOCX file.
+        kafka_producer: Optional Kafka producer injected by FastAPI.
 
     Returns:
         CVUploadResponse with a job_id for status polling.
@@ -78,40 +87,83 @@ async def upload_cv_file(
 
     job_id = uuid4()
 
-    # Write to a temporary file and parse synchronously for now
-    # (Kafka/Celery async pipeline comes in Phase 7-8)
-    with tempfile.NamedTemporaryFile(suffix=suffix, delete=True) as tmp:
-        tmp.write(contents)
-        tmp.flush()
-
-        logger.info(
-            "cv.upload.started",
-            job_id=str(job_id),
-            user_id=str(user_id),
-            filename=filename,
-            size=len(contents),
-        )
-
-        result = await parse_cv(file_path=tmp.name, user_id=user_id)
-
-    # Persist result in memory store
-    _job_store[job_id] = {
-        "job_id": job_id,
-        "user_id": user_id,
-        "status": "completed" if result.get("success") else "failed",
-        "parsed_at": datetime.now(timezone.utc) if result.get("success") else None,
-        "entries_found": len(result.get("job_entries", [])),
-        "signals_fired": len(result.get("signals", [])),
-        "error": result.get("error"),
-        "source": "upload",
-    }
-
     logger.info(
-        "cv.upload.finished",
+        "cv.upload.started",
         job_id=str(job_id),
         user_id=str(user_id),
-        success=result.get("success"),
+        filename=filename,
+        size=len(contents),
     )
+
+    # --- Kafka path: publish and return 202 immediately ---
+    published = False
+    if kafka_producer is not None:
+        try:
+            message = CVUploadMessage(
+                user_id=str(user_id),
+                source="upload",
+                s3_key=f"cv-uploads/{user_id}/{job_id}{suffix}",
+                raw_text="",  # Raw text extracted by the consumer
+                filename=filename,
+                event_id=str(job_id),
+            )
+            await kafka_producer.send(
+                topic=KafkaTopic.RAW_CV_UPLOADS.value,
+                message=message.to_dict(),
+                key=str(user_id),
+            )
+            published = True
+            logger.info(
+                "cv.upload.published_to_kafka",
+                job_id=str(job_id),
+                user_id=str(user_id),
+                topic=KafkaTopic.RAW_CV_UPLOADS.value,
+            )
+        except Exception:
+            logger.warning(
+                "cv.upload.kafka_publish_failed",
+                job_id=str(job_id),
+                user_id=str(user_id),
+                exc_info=True,
+            )
+
+    # --- Synchronous fallback: parse in-process ---
+    if not published:
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=True) as tmp:
+            tmp.write(contents)
+            tmp.flush()
+
+            result = await parse_cv(file_path=tmp.name, user_id=user_id)
+
+        _job_store[job_id] = {
+            "job_id": job_id,
+            "user_id": user_id,
+            "status": "completed" if result.get("success") else "failed",
+            "parsed_at": datetime.now(timezone.utc) if result.get("success") else None,
+            "entries_found": len(result.get("job_entries", [])),
+            "signals_fired": len(result.get("signals", [])),
+            "error": result.get("error"),
+            "source": "upload",
+        }
+
+        logger.info(
+            "cv.upload.finished_sync",
+            job_id=str(job_id),
+            user_id=str(user_id),
+            success=result.get("success"),
+        )
+    else:
+        # Mark as queued when published to Kafka
+        _job_store[job_id] = {
+            "job_id": job_id,
+            "user_id": user_id,
+            "status": "queued",
+            "parsed_at": None,
+            "entries_found": 0,
+            "signals_fired": 0,
+            "error": None,
+            "source": "upload",
+        }
 
     return CVUploadResponse(
         job_id=job_id,
@@ -132,56 +184,101 @@ async def upload_cv_text(
     user_id: UUID,
     payload: CVTextRequest,
     _current_user: User = Depends(get_current_user),
+    kafka_producer: KafkaProducerService | None = Depends(get_kafka_producer),
 ) -> CVUploadResponse:
-    """Accept pasted CV text, write to temp file, parse, and store the result.
+    """Accept pasted CV text and queue or parse it.
+
+    If a Kafka producer is available the raw text is published to
+    ``raw.cv.uploads`` and a 202 is returned immediately.  Otherwise the
+    endpoint falls back to synchronous in-process parsing.
 
     Args:
         user_id: Target user ID from the path.
         payload: Request body containing raw_text and source.
+        kafka_producer: Optional Kafka producer injected by FastAPI.
 
     Returns:
         CVUploadResponse with a job_id for status polling.
     """
     job_id = uuid4()
 
-    # Write raw text to a temp .txt-like file; the parser will treat it
-    # as plain text via docx extractor fallback.  For now we save as .docx
-    # extension to satisfy the parser's file-type detection — but the actual
-    # text content will be written as a minimal docx.
-    # A cleaner approach: write as plain text and let parse_cv accept raw text.
-    # For MVP we write raw text to a temp .txt file and pass through the parser.
-    with tempfile.NamedTemporaryFile(
-        suffix=".txt", mode="w", delete=True, encoding="utf-8"
-    ) as tmp:
-        tmp.write(payload.raw_text)
-        tmp.flush()
-
-        logger.info(
-            "cv.text.started",
-            job_id=str(job_id),
-            user_id=str(user_id),
-            text_length=len(payload.raw_text),
-        )
-
-        result = await parse_cv(file_path=tmp.name, user_id=user_id)
-
-    _job_store[job_id] = {
-        "job_id": job_id,
-        "user_id": user_id,
-        "status": "completed" if result.get("success") else "failed",
-        "parsed_at": datetime.now(timezone.utc) if result.get("success") else None,
-        "entries_found": len(result.get("job_entries", [])),
-        "signals_fired": len(result.get("signals", [])),
-        "error": result.get("error"),
-        "source": "paste",
-    }
-
     logger.info(
-        "cv.text.finished",
+        "cv.text.started",
         job_id=str(job_id),
         user_id=str(user_id),
-        success=result.get("success"),
+        text_length=len(payload.raw_text),
     )
+
+    # --- Kafka path ---
+    published = False
+    if kafka_producer is not None:
+        try:
+            message = CVUploadMessage(
+                user_id=str(user_id),
+                source="paste",
+                s3_key="",  # No file uploaded — raw text only
+                raw_text=payload.raw_text,
+                filename="paste.txt",
+                event_id=str(job_id),
+            )
+            await kafka_producer.send(
+                topic=KafkaTopic.RAW_CV_UPLOADS.value,
+                message=message.to_dict(),
+                key=str(user_id),
+            )
+            published = True
+            logger.info(
+                "cv.text.published_to_kafka",
+                job_id=str(job_id),
+                user_id=str(user_id),
+                topic=KafkaTopic.RAW_CV_UPLOADS.value,
+            )
+        except Exception:
+            logger.warning(
+                "cv.text.kafka_publish_failed",
+                job_id=str(job_id),
+                user_id=str(user_id),
+                exc_info=True,
+            )
+
+    # --- Synchronous fallback ---
+    if not published:
+        with tempfile.NamedTemporaryFile(
+            suffix=".txt", mode="w", delete=True, encoding="utf-8"
+        ) as tmp:
+            tmp.write(payload.raw_text)
+            tmp.flush()
+
+            result = await parse_cv(file_path=tmp.name, user_id=user_id)
+
+        _job_store[job_id] = {
+            "job_id": job_id,
+            "user_id": user_id,
+            "status": "completed" if result.get("success") else "failed",
+            "parsed_at": datetime.now(timezone.utc) if result.get("success") else None,
+            "entries_found": len(result.get("job_entries", [])),
+            "signals_fired": len(result.get("signals", [])),
+            "error": result.get("error"),
+            "source": "paste",
+        }
+
+        logger.info(
+            "cv.text.finished_sync",
+            job_id=str(job_id),
+            user_id=str(user_id),
+            success=result.get("success"),
+        )
+    else:
+        _job_store[job_id] = {
+            "job_id": job_id,
+            "user_id": user_id,
+            "status": "queued",
+            "parsed_at": None,
+            "entries_found": 0,
+            "signals_fired": 0,
+            "error": None,
+            "source": "paste",
+        }
 
     return CVUploadResponse(
         job_id=job_id,

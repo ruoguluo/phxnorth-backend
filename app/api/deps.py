@@ -1,8 +1,11 @@
 """API dependencies for FastAPI."""
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
 from uuid import UUID
 
-from fastapi import Depends
+from fastapi import Depends, Request
 from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError
 from sqlalchemy import select
@@ -12,6 +15,9 @@ from app.core.exceptions import AuthenticationException, AuthorizationException
 from app.core.security import verify_token
 from app.database import get_db as get_db_session
 from app.models.user import User
+
+if TYPE_CHECKING:
+    from app.kafka.producer import KafkaProducerService
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/token")
 
@@ -23,6 +29,15 @@ async def get_db() -> AsyncSession:
     """
     async for session in get_db_session():
         yield session
+
+
+def get_kafka_producer(request: Request) -> KafkaProducerService | None:
+    """Return the Kafka producer from application state, or None if unavailable.
+
+    This allows endpoints to optionally publish to Kafka while falling back
+    to synchronous processing when Kafka is not configured or reachable.
+    """
+    return getattr(request.app.state, "kafka_producer", None)
 
 
 async def get_current_user(
