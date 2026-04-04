@@ -7,6 +7,7 @@ import structlog
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.cache.redis_client import RedisCacheService
 from app.config import get_settings
 from app.kafka.producer import KafkaProducerService
 from app.core.exceptions import (
@@ -38,6 +39,20 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Initialize database connections, etc.
     # TODO: Add database initialization when Task 6 is complete
     
+    # Start Redis cache (optional — gracefully degrade if unavailable)
+    redis_cache: RedisCacheService | None = None
+    try:
+        redis_cache = RedisCacheService()
+        await redis_cache.connect()
+        app.state.redis = redis_cache
+        logger.info("redis_cache_attached_to_app")
+    except Exception:
+        logger.warning(
+            "redis_cache_unavailable",
+            msg="Redis failed to connect; cache operations will be unavailable.",
+        )
+        app.state.redis = None
+    
     # Start Kafka producer (optional — gracefully degrade if unavailable)
     kafka_producer: KafkaProducerService | None = None
     try:
@@ -57,7 +72,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Shutdown
     if kafka_producer is not None:
         await kafka_producer.stop()
-    # TODO: Cleanup other resources when needed
+    if redis_cache is not None:
+        await redis_cache.disconnect()
 
 
 def create_application() -> FastAPI:

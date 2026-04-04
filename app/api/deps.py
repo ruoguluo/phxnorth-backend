@@ -17,6 +17,7 @@ from app.database import get_db as get_db_session
 from app.models.user import User
 
 if TYPE_CHECKING:
+    from app.cache.redis_client import RedisCacheService
     from app.kafka.producer import KafkaProducerService
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/token")
@@ -29,6 +30,14 @@ async def get_db() -> AsyncSession:
     """
     async for session in get_db_session():
         yield session
+
+
+def get_redis(request: Request) -> RedisCacheService | None:
+    """Return the Redis cache service from application state, or None if unavailable.
+
+    Endpoints should handle the ``None`` case gracefully (e.g. skip caching).
+    """
+    return getattr(request.app.state, "redis", None)
 
 
 def get_kafka_producer(request: Request) -> KafkaProducerService | None:
