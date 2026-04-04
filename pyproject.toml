@@ -46,6 +46,9 @@ spacy = "^3.7.0"
 # DOCX Processing
 python-docx = "^1.1.0"
 
+# Numerical
+numpy = "^1.26.0"
+
 # Logging
 structlog = "^24.1.0"
 
