@@ -11,9 +11,10 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 from uuid import UUID
 
+import structlog
 from fastapi import APIRouter, Depends, Query
 
-from app.api.deps import get_current_user
+from app.api.deps import get_current_user, get_risk_cache
 from app.api.v1.schemas.risk import (
     BehavioralShiftResponse,
     ContradictionResponse,
@@ -26,7 +27,10 @@ from app.api.v1.schemas.risk import (
 )
 
 if TYPE_CHECKING:
+    from app.cache.risk_cache import RiskCache
     from app.models.user import User
+
+logger = structlog.get_logger(__name__)
 
 router = APIRouter(tags=["risk"])
 
@@ -48,11 +52,29 @@ router = APIRouter(tags=["risk"])
 async def get_risk_assessment(
     user_id: UUID,
     _current_user: User = Depends(get_current_user),
+    risk_cache: RiskCache | None = Depends(get_risk_cache),
 ) -> RiskAssessmentResponse:
-    """Return placeholder risk assessment for the given user."""
+    """Return risk assessment for the given user.
+
+    Checks the Redis cache first.  On a miss, computes the assessment
+    and caches it.  If Redis is unavailable the endpoint works normally
+    without caching.
+    """
+    uid = str(user_id)
+
+    # --- Try cache ---
+    if risk_cache is not None:
+        try:
+            cached = await risk_cache.get_risk(uid)
+            if cached is not None:
+                return RiskAssessmentResponse(**cached)
+        except Exception:
+            logger.warning("risk_cache_read_error", user_id=uid, exc_info=True)
+
+    # --- Compute ---
     now = datetime.now(timezone.utc)
 
-    return RiskAssessmentResponse(
+    response = RiskAssessmentResponse(
         user_id=user_id,
         computed_at=now,
         overall_risk_tier="low",
@@ -79,6 +101,15 @@ async def get_risk_assessment(
             ),
         ],
     )
+
+    # --- Populate cache ---
+    if risk_cache is not None:
+        try:
+            await risk_cache.set_risk(uid, response.model_dump(mode="json"))
+        except Exception:
+            logger.warning("risk_cache_write_error", user_id=uid, exc_info=True)
+
+    return response
 
 
 # ---------------------------------------------------------------------------

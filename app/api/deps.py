@@ -17,7 +17,10 @@ from app.database import get_db as get_db_session
 from app.models.user import User
 
 if TYPE_CHECKING:
+    from app.cache.dedup import EventDeduplicator
+    from app.cache.disc_cache import DISCProfileCache
     from app.cache.redis_client import RedisCacheService
+    from app.cache.risk_cache import RiskCache
     from app.kafka.producer import KafkaProducerService
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/token")
@@ -38,6 +41,45 @@ def get_redis(request: Request) -> RedisCacheService | None:
     Endpoints should handle the ``None`` case gracefully (e.g. skip caching).
     """
     return getattr(request.app.state, "redis", None)
+
+
+def get_disc_cache(request: Request) -> DISCProfileCache | None:
+    """Return a DISC profile cache instance, or None if Redis is unavailable.
+
+    Endpoints should handle the ``None`` case gracefully (skip caching).
+    """
+    redis = getattr(request.app.state, "redis", None)
+    if redis is None:
+        return None
+    from app.cache.disc_cache import DISCProfileCache
+
+    return DISCProfileCache(redis)
+
+
+def get_risk_cache(request: Request) -> RiskCache | None:
+    """Return a risk cache instance, or None if Redis is unavailable.
+
+    Endpoints should handle the ``None`` case gracefully (skip caching).
+    """
+    redis = getattr(request.app.state, "redis", None)
+    if redis is None:
+        return None
+    from app.cache.risk_cache import RiskCache
+
+    return RiskCache(redis)
+
+
+def get_deduplicator(request: Request) -> EventDeduplicator | None:
+    """Return an event deduplicator instance, or None if Redis is unavailable.
+
+    Endpoints should handle the ``None`` case gracefully (skip dedup).
+    """
+    redis = getattr(request.app.state, "redis", None)
+    if redis is None:
+        return None
+    from app.cache.dedup import EventDeduplicator
+
+    return EventDeduplicator(redis)
 
 
 def get_kafka_producer(request: Request) -> KafkaProducerService | None:

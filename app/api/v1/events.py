@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any
 import structlog
 from fastapi import APIRouter, Depends, status
 
-from app.api.deps import get_kafka_producer
+from app.api.deps import get_deduplicator, get_kafka_producer
 from app.api.v1.schemas.events import (
     BatchEventsIn,
     EventIn,
@@ -24,6 +24,7 @@ from app.kafka.topics import KafkaTopic
 from app.services.signal_extractor.validation.event_validator import validate_event
 
 if TYPE_CHECKING:
+    from app.cache.dedup import EventDeduplicator
     from app.kafka.producer import KafkaProducerService
 
 logger = structlog.get_logger(__name__)
@@ -144,9 +145,11 @@ async def ingest_event(
     event: EventIn,
     current_user: dict[str, Any] = Depends(_require_auth),
     kafka_producer: KafkaProducerService | None = Depends(get_kafka_producer),
+    deduplicator: EventDeduplicator | None = Depends(get_deduplicator),
 ) -> EventIngestionResponse:
     """Ingest a single behavioral event.
 
+    If a deduplicator is available, duplicate event IDs are rejected.
     If a Kafka producer is available the validated event is published to
     ``raw.behavioral.events``.  Otherwise the event is accepted
     synchronously (logged only until downstream persistence is wired).
@@ -160,6 +163,29 @@ async def ingest_event(
             event_ids=[],
             rejected_details=[rejected],
         )
+
+    # --- Deduplication ---
+    if deduplicator is not None and event_id is not None:
+        try:
+            is_new = await deduplicator.check_and_mark(event_id)
+            if not is_new:
+                logger.info("event_duplicate_rejected", event_id=event_id)
+                return EventIngestionResponse(
+                    accepted=0,
+                    rejected=1,
+                    event_ids=[],
+                    rejected_details=[
+                        RejectedEventDetail(
+                            index=0,
+                            event_id=event_id,
+                            errors=["Duplicate event_id"],
+                        ),
+                    ],
+                )
+        except Exception:
+            logger.warning(
+                "dedup_check_failed", event_id=event_id, exc_info=True
+            )
 
     # Publish to Kafka (best-effort; fall back to sync acceptance)
     await _publish_events_to_kafka(kafka_producer, [event], [event_id])  # type: ignore[arg-type]
@@ -185,11 +211,13 @@ async def ingest_batch(
     body: BatchEventsIn,
     current_user: dict[str, Any] = Depends(_require_auth),
     kafka_producer: KafkaProducerService | None = Depends(get_kafka_producer),
+    deduplicator: EventDeduplicator | None = Depends(get_deduplicator),
 ) -> EventIngestionResponse:
     """Ingest a batch of behavioral events (max 100).
 
-    Validated events are published to Kafka when a producer is available,
-    otherwise they are accepted synchronously.
+    Validated events are checked for duplicates (when Redis is available)
+    and published to Kafka when a producer is available, otherwise they
+    are accepted synchronously.
     """
     accepted_ids: list[str] = []
     accepted_events: list[EventIn] = []
@@ -199,9 +227,36 @@ async def ingest_batch(
         event_id, rejected = _process_single_event(event, index=idx)
         if rejected is not None:
             rejected_details.append(rejected)
-        else:
-            accepted_ids.append(event_id)  # type: ignore[arg-type]
-            accepted_events.append(event)
+            continue
+
+        # --- Deduplication ---
+        if deduplicator is not None and event_id is not None:
+            try:
+                is_new = await deduplicator.check_and_mark(event_id)
+                if not is_new:
+                    logger.info(
+                        "batch_event_duplicate_rejected",
+                        event_id=event_id,
+                        index=idx,
+                    )
+                    rejected_details.append(
+                        RejectedEventDetail(
+                            index=idx,
+                            event_id=event_id,
+                            errors=["Duplicate event_id"],
+                        ),
+                    )
+                    continue
+            except Exception:
+                logger.warning(
+                    "dedup_check_failed",
+                    event_id=event_id,
+                    index=idx,
+                    exc_info=True,
+                )
+
+        accepted_ids.append(event_id)  # type: ignore[arg-type]
+        accepted_events.append(event)
 
     # Publish accepted events to Kafka
     await _publish_events_to_kafka(kafka_producer, accepted_events, accepted_ids)

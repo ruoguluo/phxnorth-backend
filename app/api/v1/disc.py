@@ -9,12 +9,14 @@ disc_profiles table via the DISC engine service.
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from typing import TYPE_CHECKING
 from uuid import UUID
 
+import structlog
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user, get_db
+from app.api.deps import get_current_user, get_db, get_disc_cache
 from app.api.v1.schemas.disc import (
     DISCHistoryEntry,
     DISCProfileHistoryResponse,
@@ -23,6 +25,11 @@ from app.api.v1.schemas.disc import (
     WindowParam,
 )
 from app.models.user import User
+
+if TYPE_CHECKING:
+    from app.cache.disc_cache import DISCProfileCache
+
+logger = structlog.get_logger(__name__)
 
 router = APIRouter(tags=["disc"])
 
@@ -74,17 +81,30 @@ async def get_disc_profile(
     ),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    disc_cache: DISCProfileCache | None = Depends(get_disc_cache),
 ) -> DISCProfileResponse:
     """Return the DISC profile for *user_id*.
 
-    Currently returns mock data.  A future phase will query the
-    ``disc_profiles`` table filtered by ``window_days`` and
-    ``user_id``.
+    Checks the Redis cache first.  On a miss, computes the profile and
+    caches it for subsequent requests.  If Redis is unavailable the
+    endpoint works normally without caching.
     """
+    uid = str(user_id)
+
+    # --- Try cache ---
+    if disc_cache is not None:
+        try:
+            cached = await disc_cache.get_profile(uid, window.value)
+            if cached is not None:
+                return DISCProfileResponse(**cached)
+        except Exception:
+            logger.warning("disc_cache_read_error", user_id=uid, exc_info=True)
+
+    # --- Compute ---
     scores = _mock_scores()
     dominant, secondary = _dominant_secondary(scores)
 
-    return DISCProfileResponse(
+    response = DISCProfileResponse(
         user_id=user_id,
         window=window.value,
         computed_at=datetime.now(timezone.utc),
@@ -94,6 +114,17 @@ async def get_disc_profile(
         secondary=secondary,
         data_sources=47,
     )
+
+    # --- Populate cache ---
+    if disc_cache is not None:
+        try:
+            await disc_cache.set_profile(
+                uid, window.value, response.model_dump(mode="json"),
+            )
+        except Exception:
+            logger.warning("disc_cache_write_error", user_id=uid, exc_info=True)
+
+    return response
 
 
 @router.get(
