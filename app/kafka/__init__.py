@@ -1,6 +1,8 @@
 """Kafka integration for PhxNorth event streaming pipeline."""
 
+from app.kafka.consumer import KafkaConsumerService
 from app.kafka.dlq import DeadLetterQueue
+from app.kafka.producer import KafkaProducerService
 from app.kafka.schemas import (
     BehavioralEventMessage,
     CVUploadMessage,
@@ -15,6 +17,8 @@ __all__ = [
     "CVUploadMessage",
     "DeadLetterQueue",
     "DISCUpdateMessage",
+    "KafkaConsumerService",
+    "KafkaProducerService",
     "KafkaTopic",
     "RiskFlagMessage",
     "SignalMessage",
