@@ -2,7 +2,7 @@
 
 from fastapi import APIRouter
 
-from app.api.v1 import auth, career, cv, disc, events, health, risk
+from app.api.v1 import admin, auth, career, cv, disc, events, health, risk
 
 api_router = APIRouter()
 
@@ -26,3 +26,6 @@ api_router.include_router(risk.router, tags=["risk"])
 
 # Include career profile and preference index routes
 api_router.include_router(career.router, tags=["career"])
+
+# Include admin-only routes
+api_router.include_router(admin.router, prefix="/admin", tags=["admin"])
