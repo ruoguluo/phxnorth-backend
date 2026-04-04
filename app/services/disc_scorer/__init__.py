@@ -25,6 +25,7 @@ from app.services.disc_scorer.windows import (
     WINDOWS,
     compute_windowed_profiles,
 )
+from app.services.disc_scorer.worker import compute_user_disc_profile
 
 __all__ = [
     "CONFIDENCE_THRESHOLD",
@@ -40,8 +41,9 @@ __all__ = [
     "compute_disc_distance",
     "compute_disc_scores",
     "compute_time_weight",
+    "compute_user_disc_profile",
+    "compute_windowed_profiles",
     "detect_personality_shift",
     "infer_preferences",
-    "compute_windowed_profiles",
     "normalize_to_range",
 ]
