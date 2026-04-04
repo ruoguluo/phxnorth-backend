@@ -7,7 +7,19 @@ from typing import Any
 import structlog
 from structlog.types import Processor
 
-from app.config import settings
+from app.config import get_settings
+
+
+settings = get_settings()
+
+
+def setup_logging() -> None:
+    """Set up structured logging with structlog.
+    
+    Sets up structlog with appropriate processors for both
+    JSON logs (production) and pretty console logs (development).
+    """
+    configure_logging()
 
 
 def configure_logging() -> None:
