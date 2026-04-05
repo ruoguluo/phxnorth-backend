@@ -241,60 +241,50 @@ async def upload_cv_file(
                 exc_info=True,
             )
 
-    # --- Synchronous fallback: parse in-process ---
-    if not published:
-        with tempfile.NamedTemporaryFile(suffix=suffix, delete=True) as tmp:
-            tmp.write(contents)
-            tmp.flush()
+    # --- Always parse synchronously for immediate results ---
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=True) as tmp:
+        tmp.write(contents)
+        tmp.flush()
 
-            result = await parse_cv(file_path=tmp.name, user_id=user_id)
+        result = await parse_cv(file_path=tmp.name, user_id=user_id)
 
-        _job_store[job_id] = {
-            "job_id": job_id,
-            "user_id": user_id,
-            "status": "completed" if result.get("success") else "failed",
-            "parsed_at": datetime.now(timezone.utc) if result.get("success") else None,
-            "entries_found": len(result.get("job_entries", [])),
-            "signals_fired": len(result.get("signals", [])),
-            "error": result.get("error"),
-            "source": "upload",
-        }
+    parse_success = result.get("success", False)
 
-        # Persist to database if parsing succeeded
-        if result.get("success"):
-            try:
-                await _persist_parse_result(db, user_id, "upload", result)
-            except Exception:
-                logger.exception(
-                    "cv.upload.persist_failed",
-                    job_id=str(job_id),
-                    user_id=str(user_id),
-                )
+    _job_store[job_id] = {
+        "job_id": job_id,
+        "user_id": user_id,
+        "status": "completed" if parse_success else "failed",
+        "parsed_at": datetime.now(timezone.utc) if parse_success else None,
+        "entries_found": len(result.get("job_entries", [])),
+        "signals_fired": len(result.get("signals", [])),
+        "error": result.get("error"),
+        "source": "upload",
+    }
 
-        logger.info(
-            "cv.upload.finished_sync",
-            job_id=str(job_id),
-            user_id=str(user_id),
-            success=result.get("success"),
-        )
-    else:
-        # Mark as queued when published to Kafka
-        _job_store[job_id] = {
-            "job_id": job_id,
-            "user_id": user_id,
-            "status": "queued",
-            "parsed_at": None,
-            "entries_found": 0,
-            "signals_fired": 0,
-            "error": None,
-            "source": "upload",
-        }
+    # Persist to database if parsing succeeded
+    if parse_success:
+        try:
+            await _persist_parse_result(db, user_id, "upload", result)
+        except Exception:
+            logger.exception(
+                "cv.upload.persist_failed",
+                job_id=str(job_id),
+                user_id=str(user_id),
+            )
+
+    logger.info(
+        "cv.upload.finished",
+        job_id=str(job_id),
+        user_id=str(user_id),
+        success=parse_success,
+        entries_found=len(result.get("job_entries", [])),
+    )
 
     return CVUploadResponse(
         job_id=job_id,
         user_id=user_id,
-        status="queued",
-        message="CV processing has been queued",
+        status="completed" if parse_success else "failed",
+        message="CV parsed successfully" if parse_success else f"CV parsing failed: {result.get('error', 'unknown')}",
     )
 
 
@@ -367,61 +357,52 @@ async def upload_cv_text(
                 exc_info=True,
             )
 
-    # --- Synchronous fallback ---
-    if not published:
-        with tempfile.NamedTemporaryFile(
-            suffix=".txt", mode="w", delete=True, encoding="utf-8"
-        ) as tmp:
-            tmp.write(payload.raw_text)
-            tmp.flush()
+    # --- Always parse synchronously for immediate results ---
+    with tempfile.NamedTemporaryFile(
+        suffix=".txt", mode="w", delete=True, encoding="utf-8"
+    ) as tmp:
+        tmp.write(payload.raw_text)
+        tmp.flush()
 
-            result = await parse_cv(file_path=tmp.name, user_id=user_id)
+        result = await parse_cv(file_path=tmp.name, user_id=user_id)
 
-        _job_store[job_id] = {
-            "job_id": job_id,
-            "user_id": user_id,
-            "status": "completed" if result.get("success") else "failed",
-            "parsed_at": datetime.now(timezone.utc) if result.get("success") else None,
-            "entries_found": len(result.get("job_entries", [])),
-            "signals_fired": len(result.get("signals", [])),
-            "error": result.get("error"),
-            "source": "paste",
-        }
+    parse_success = result.get("success", False)
 
-        # Persist to database if parsing succeeded
-        if result.get("success"):
-            try:
-                await _persist_parse_result(db, user_id, "paste", result)
-            except Exception:
-                logger.exception(
-                    "cv.text.persist_failed",
-                    job_id=str(job_id),
-                    user_id=str(user_id),
-                )
+    _job_store[job_id] = {
+        "job_id": job_id,
+        "user_id": user_id,
+        "status": "completed" if parse_success else "failed",
+        "parsed_at": datetime.now(timezone.utc) if parse_success else None,
+        "entries_found": len(result.get("job_entries", [])),
+        "signals_fired": len(result.get("signals", [])),
+        "error": result.get("error"),
+        "source": "paste",
+    }
 
-        logger.info(
-            "cv.text.finished_sync",
-            job_id=str(job_id),
-            user_id=str(user_id),
-            success=result.get("success"),
-        )
-    else:
-        _job_store[job_id] = {
-            "job_id": job_id,
-            "user_id": user_id,
-            "status": "queued",
-            "parsed_at": None,
-            "entries_found": 0,
-            "signals_fired": 0,
-            "error": None,
-            "source": "paste",
-        }
+    # Persist to database if parsing succeeded
+    if parse_success:
+        try:
+            await _persist_parse_result(db, user_id, "paste", result)
+        except Exception:
+            logger.exception(
+                "cv.text.persist_failed",
+                job_id=str(job_id),
+                user_id=str(user_id),
+            )
+
+    logger.info(
+        "cv.text.finished",
+        job_id=str(job_id),
+        user_id=str(user_id),
+        success=parse_success,
+        entries_found=len(result.get("job_entries", [])),
+    )
 
     return CVUploadResponse(
         job_id=job_id,
         user_id=user_id,
-        status="queued",
-        message="CV text processing has been queued",
+        status="completed" if parse_success else "failed",
+        message="CV parsed successfully" if parse_success else f"CV parsing failed: {result.get('error', 'unknown')}",
     )
 
 
