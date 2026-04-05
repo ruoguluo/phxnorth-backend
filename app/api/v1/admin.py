@@ -12,8 +12,10 @@ from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, Query
+from sqlalchemy import delete, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import require_admin
+from app.api.deps import get_db, require_admin
 from app.api.v1.schemas.admin import (
     DISCRecomputeResponse,
     RedFlagItem,
@@ -215,3 +217,67 @@ async def list_red_flags(
         filtered = [f for f in filtered if f.created_at >= from_date]
 
     return RedFlagListResponse(total=len(filtered), flags=filtered)
+
+
+@router.delete(
+    "/users/{user_id}/disc-data",
+    summary="Reset DISC data for a user",
+    response_model=dict,
+)
+async def reset_user_disc_data(
+    user_id: UUID,
+    current_user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Delete all DISC-related data for a user (career, DISC profiles, risk, etc.).
+
+    The user record itself is deleted; it will be auto-recreated on next login
+    via the shared auth flow.
+    """
+    from app.models.user import User as UserModel
+
+    # Verify user exists
+    result = await db.execute(select(UserModel).where(UserModel.id == user_id))
+    user = result.scalar_one_or_none()
+
+    if user is None:
+        return {"status": "not_found", "message": f"No DISC user with id {user_id}"}
+
+    email = user.email
+
+    # CASCADE delete removes all related records
+    await db.execute(delete(UserModel).where(UserModel.id == user_id))
+    await db.commit()
+
+    return {
+        "status": "ok",
+        "message": f"All DISC data for {email} has been reset",
+        "user_id": str(user_id),
+        "email": email,
+    }
+
+
+@router.get(
+    "/users",
+    summary="List all DISC backend users",
+    response_model=list[dict],
+)
+async def list_disc_users(
+    current_user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+) -> list[dict]:
+    """List all users in the DISC backend database."""
+    from app.models.user import User as UserModel
+
+    result = await db.execute(select(UserModel).order_by(UserModel.created_at.desc()))
+    users = result.scalars().all()
+
+    return [
+        {
+            "id": str(u.id),
+            "email": u.email,
+            "is_active": u.is_active,
+            "created_at": u.created_at.isoformat() if u.created_at else None,
+        }
+        for u in users
+    ]
