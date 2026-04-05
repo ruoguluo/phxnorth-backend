@@ -3,18 +3,26 @@
 from __future__ import annotations
 
 import tempfile
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, status
+from sqlalchemy import delete
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user, get_kafka_producer
+from app.api.deps import get_current_user, get_db, get_kafka_producer
 from app.api.v1.schemas.cv import CVStatusResponse, CVTextRequest, CVUploadResponse
 from app.kafka.schemas import CVUploadMessage
 from app.kafka.topics import KafkaTopic
+from app.models.career import (
+    CareerAnalytics as CareerAnalyticsModel,
+    CareerProfile,
+    JobEntry,
+    ProfileSource,
+)
 from app.services.cv_parser.parser import parse_cv
 
 if TYPE_CHECKING:
@@ -32,6 +40,111 @@ ALLOWED_EXTENSIONS = {".pdf", ".docx"}
 MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB
 
 
+def _parse_date(value: str | date | None) -> date | None:
+    """Convert a date string (YYYY-MM-DD) or date object to a date, or None."""
+    if value is None:
+        return None
+    if isinstance(value, date):
+        return value
+    try:
+        return date.fromisoformat(str(value))
+    except (ValueError, TypeError):
+        return None
+
+
+async def _persist_parse_result(
+    db: AsyncSession,
+    user_id: UUID,
+    source: str,
+    result: dict[str, Any],
+) -> None:
+    """Store parsed CV data in career_profiles, job_entries, and career_analytics.
+
+    Deletes any existing career data for the user before inserting, so that
+    re-uploading a CV replaces old data.
+    """
+    now = datetime.now(timezone.utc)
+
+    # --- Clean up existing data for this user ---
+    await db.execute(delete(JobEntry).where(JobEntry.user_id == user_id))
+    await db.execute(delete(CareerProfile).where(CareerProfile.user_id == user_id))
+    await db.execute(
+        delete(CareerAnalyticsModel).where(CareerAnalyticsModel.user_id == user_id)
+    )
+
+    # --- CareerProfile ---
+    profile_source = ProfileSource.UPLOAD if source == "upload" else ProfileSource.PASTE
+    profile = CareerProfile(
+        user_id=user_id,
+        source=profile_source,
+        raw_text=result.get("raw_text"),
+        parsed_at=now,
+        parser_version=result.get("parser_version"),
+    )
+    db.add(profile)
+    await db.flush()  # Populate profile.id for FK references
+
+    # --- JobEntries ---
+    for idx, entry in enumerate(result.get("job_entries", [])):
+        start = _parse_date(entry.get("start_date"))
+        if start is None:
+            # start_date is required — skip entries without one
+            logger.warning(
+                "cv.persist.skipping_job_entry",
+                reason="missing_start_date",
+                index=idx,
+                company=entry.get("company_name"),
+            )
+            continue
+
+        job = JobEntry(
+            career_profile_id=profile.id,
+            user_id=user_id,
+            company_name=entry.get("company_name"),
+            job_title=entry.get("job_title"),
+            start_date=start,
+            end_date=_parse_date(entry.get("end_date")),
+            duration_months=entry.get("duration_months"),
+            description_raw=entry.get("description"),
+            sequence_index=idx,
+        )
+        db.add(job)
+
+    # --- CareerAnalytics ---
+    analytics = result.get("analytics") or {}
+    metrics = analytics.get("metrics") or {}
+    if metrics:
+        analytics_record = CareerAnalyticsModel(
+            user_id=user_id,
+            total_roles=metrics.get("total_roles"),
+            short_tenure_count=metrics.get("short_tenure_count"),
+            short_tenure_rate=metrics.get("short_tenure_rate"),
+            avg_tenure_months=metrics.get("avg_tenure_months"),
+            career_span_years=metrics.get("career_span_years"),
+            transition_frequency=metrics.get("transition_frequency"),
+            cross_industry_transitions=metrics.get("cross_industry_transitions"),
+            upward_moves=metrics.get("upward_moves"),
+            lateral_moves=metrics.get("lateral_moves"),
+            downward_moves=metrics.get("downward_moves"),
+            industry_diversity_score=metrics.get("industry_diversity_score"),
+            functional_diversity_score=metrics.get("functional_diversity_score"),
+            longest_tenure_months=metrics.get("longest_tenure_months"),
+            career_volatility_score=metrics.get("career_volatility_score"),
+            computed_at=now,
+        )
+        db.add(analytics_record)
+
+    await db.commit()
+
+    logger.info(
+        "cv.persist.completed",
+        user_id=str(user_id),
+        profile_id=str(profile.id),
+        job_entries_saved=len(result.get("job_entries", [])),
+        has_analytics=bool(metrics),
+    )
+
+
 @router.post(
     "/users/{user_id}/cv/upload",
     response_model=CVUploadResponse,
@@ -44,6 +157,7 @@ async def upload_cv_file(
     file: UploadFile,
     _current_user: User = Depends(get_current_user),
     kafka_producer: KafkaProducerService | None = Depends(get_kafka_producer),
+    db: AsyncSession = Depends(get_db),
 ) -> CVUploadResponse:
     """Accept a CV file upload, parse it, and store the result.
 
@@ -146,6 +260,17 @@ async def upload_cv_file(
             "source": "upload",
         }
 
+        # Persist to database if parsing succeeded
+        if result.get("success"):
+            try:
+                await _persist_parse_result(db, user_id, "upload", result)
+            except Exception:
+                logger.exception(
+                    "cv.upload.persist_failed",
+                    job_id=str(job_id),
+                    user_id=str(user_id),
+                )
+
         logger.info(
             "cv.upload.finished_sync",
             job_id=str(job_id),
@@ -185,6 +310,7 @@ async def upload_cv_text(
     payload: CVTextRequest,
     _current_user: User = Depends(get_current_user),
     kafka_producer: KafkaProducerService | None = Depends(get_kafka_producer),
+    db: AsyncSession = Depends(get_db),
 ) -> CVUploadResponse:
     """Accept pasted CV text and queue or parse it.
 
@@ -261,6 +387,17 @@ async def upload_cv_text(
             "error": result.get("error"),
             "source": "paste",
         }
+
+        # Persist to database if parsing succeeded
+        if result.get("success"):
+            try:
+                await _persist_parse_result(db, user_id, "paste", result)
+            except Exception:
+                logger.exception(
+                    "cv.text.persist_failed",
+                    job_id=str(job_id),
+                    user_id=str(user_id),
+                )
 
         logger.info(
             "cv.text.finished_sync",
