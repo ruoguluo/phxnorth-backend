@@ -140,15 +140,29 @@ async def get_current_user(
 
     user = result.scalar_one_or_none()
 
+    # Extract role from JWT (mentorship backend includes "role" in token)
+    jwt_role = payload.get("role")
+
     if user is None:
         # Auto-create user record for existing mentorship users on first DISC access
         if token_type != "access" and sub:
-            user = User(email=sub, is_active=True)
+            user = User(
+                email=sub,
+                is_active=True,
+                is_superuser=(jwt_role == "admin"),
+            )
             db.add(user)
             await db.commit()
             await db.refresh(user)
         else:
             raise AuthenticationException(message="User not found")
+
+    # Sync superuser status from JWT role on every request
+    # (in case the mentorship backend promoted/demoted the user)
+    if jwt_role == "admin" and not user.is_superuser:
+        user.is_superuser = True
+        await db.commit()
+        await db.refresh(user)
 
     if not user.is_active:
         raise AuthenticationException(message="User account is inactive")
