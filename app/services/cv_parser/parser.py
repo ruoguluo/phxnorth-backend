@@ -160,6 +160,11 @@ async def parse_cv(file_path: str | Path, user_id: UUID | None = None) -> dict:
         # Step 3: Extract job entries from work experience section
         work_experience_text = _get_work_experience_text(sections)
         
+        # Fallback: if no work_experience section detected, use full raw text
+        # The job entry extractor uses date-range patterns to find jobs regardless
+        if not work_experience_text:
+            work_experience_text = raw_text
+        
         if work_experience_text:
             job_extraction_result = await extract_job_entries(work_experience_text)
             

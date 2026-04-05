@@ -67,10 +67,12 @@ SECTION_KEYWORDS: dict[str, list[str]] = {
 }
 
 # Compile regex patterns for section header detection
+# Only ALL CAPS and Title Case with explicit colon/dash are reliable header signals.
+# Title Case without punctuation (e.g. "Senior Software Engineer") matches too many
+# non-header lines and causes incorrect section splits.
 HEADER_PATTERNS = [
-    re.compile(r"^\s*([A-Z][A-Z\s&]+)\s*[:\-]?\s*$"),  # ALL CAPS headers
-    re.compile(r"^\s*([A-Z][a-zA-Z\s&]+)\s*[:\-]\s*$"),  # Title Case with colon/dash
-    re.compile(r"^\s*([A-Z][a-zA-Z\s&]+)\s*$"),  # Title Case without punctuation
+    re.compile(r"^\s*([A-Z][A-Z\s&/]+)\s*[:\-]?\s*$"),  # ALL CAPS headers (primary signal)
+    re.compile(r"^\s*([A-Z][a-zA-Z\s&/]+)\s*[:\-]\s*$"),  # Title Case with colon/dash only
 ]
 
 # spaCy model (lazy loaded)
