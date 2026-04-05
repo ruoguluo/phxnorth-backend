@@ -12,7 +12,6 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     POETRY_NO_INTERACTION=1 \
-    POETRY_VENV_IN_PROJECT=1 \
     POETRY_CACHE_DIR=/tmp/poetry_cache
 
 # Install system dependencies
@@ -36,14 +35,14 @@ COPY pyproject.toml poetry.lock* ./
 # =============================================================================
 FROM base AS development
 
-# Install all dependencies (including dev)
+# Install all dependencies (including dev) without the root package
 RUN poetry install --with dev --no-root && rm -rf $POETRY_CACHE_DIR
 
 # Copy application code
 COPY . .
 
-# Install the package in editable mode
-RUN poetry install --only-root
+# Install just the root package into the existing venv
+RUN poetry install
 
 # Expose port
 EXPOSE 8000
@@ -65,8 +64,8 @@ RUN poetry install --without dev --no-root && rm -rf $POETRY_CACHE_DIR
 # Copy application code
 COPY . .
 
-# Install the package
-RUN poetry install --only-root
+# Install just the root package into the existing venv
+RUN poetry install --without dev
 
 # Change ownership to non-root user
 RUN chown -R appuser:appgroup /app

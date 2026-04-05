@@ -12,9 +12,6 @@ services:
       target: development
     ports:
       - "8000:8000"
-    volumes:
-      - .:/app
-      - /app/.venv  # Prevent overwriting container venv
     environment:
       - ENVIRONMENT=development
       - DEBUG=true
@@ -38,9 +35,6 @@ services:
       dockerfile: Dockerfile
       target: development
     command: poetry run celery -A app.workers.celery_app worker --loglevel=info
-    volumes:
-      - .:/app
-      - /app/.venv
     environment:
       - ENVIRONMENT=development
       - DATABASE_URL=postgresql+asyncpg://phxnorth:phxnorth@postgres:5432/phxnorth
@@ -58,9 +52,6 @@ services:
       dockerfile: Dockerfile
       target: development
     command: poetry run celery -A app.workers.celery_app beat --loglevel=info
-    volumes:
-      - .:/app
-      - /app/.venv
     environment:
       - ENVIRONMENT=development
       - REDIS_URL=redis://redis:6379/0
@@ -117,7 +108,7 @@ services:
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT
       KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
       # Cluster
-      CLUSTER_ID: PhxNorthLocalDev000000000
+      CLUSTER_ID: 3Z9FomgzSZOtC8uJ0bJHbg
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1

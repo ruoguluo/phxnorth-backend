@@ -97,6 +97,13 @@ async def get_current_user(
 ) -> User:
     """Extract and validate the current user from the JWT access token.
 
+    Supports two JWT formats:
+    1. DISC backend tokens: {"sub": "<uuid>", "type": "access", "role": "..."}
+    2. Existing mentorship backend tokens: {"sub": "<email>"}
+
+    This allows users who authenticate via the existing mentorship backend
+    to also access DISC endpoints with the same token.
+
     Args:
         token: Bearer token extracted by OAuth2PasswordBearer.
         db: Async database session.
@@ -109,21 +116,39 @@ async def get_current_user(
     """
     try:
         payload = verify_token(token)
-    except JWTError:
+    except (JWTError, Exception):
         raise AuthenticationException(message="Invalid or expired token")
 
-    if payload.get("type") != "access":
-        raise AuthenticationException(message="Invalid token type")
-
-    user_id = payload.get("sub")
-    if user_id is None:
+    sub = payload.get("sub")
+    if sub is None:
         raise AuthenticationException(message="Invalid token payload")
 
-    result = await db.execute(select(User).where(User.id == UUID(user_id)))
+    # Determine if this is a DISC backend token (has "type" field) or
+    # an existing mentorship backend token (sub is an email string).
+    token_type = payload.get("type")
+
+    if token_type == "access":
+        # DISC backend token — sub is a UUID
+        try:
+            result = await db.execute(select(User).where(User.id == UUID(sub)))
+        except (ValueError, AttributeError):
+            raise AuthenticationException(message="Invalid token payload")
+    else:
+        # Existing mentorship backend token — sub is an email
+        # Look up user by email, or auto-create a DISC-side user record
+        result = await db.execute(select(User).where(User.email == sub))
+
     user = result.scalar_one_or_none()
 
     if user is None:
-        raise AuthenticationException(message="User not found")
+        # Auto-create user record for existing mentorship users on first DISC access
+        if token_type != "access" and sub:
+            user = User(email=sub, is_active=True)
+            db.add(user)
+            await db.commit()
+            await db.refresh(user)
+        else:
+            raise AuthenticationException(message="User not found")
 
     if not user.is_active:
         raise AuthenticationException(message="User account is inactive")

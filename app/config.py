@@ -23,7 +23,7 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
 
     # Security settings
-    secret_key: str = "your-secret-key-change-in-production"
+    secret_key: str = "phxnorth-dev-secret-key-change-in-production"
     access_token_expire_minutes: int = 30
     algorithm: str = "HS256"
 
@@ -38,6 +38,16 @@ class Settings(BaseSettings):
 
     # API
     api_prefix: str = "/api/v1"
+
+    # S3
+    s3_bucket: str = ""
+    s3_region: str = "us-east-1"
+    aws_access_key_id: str = ""
+    aws_secret_access_key: str = ""
+
+    # Webhooks
+    webhook_timeout: int = 10
+    webhook_max_retries: int = 5
 
     @property
     def is_development(self) -> bool:

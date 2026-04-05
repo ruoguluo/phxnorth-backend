@@ -45,7 +45,7 @@ def configure_logging() -> None:
         structlog.contextvars.merge_contextvars,
     ]
 
-    if settings.ENVIRONMENT == "development":
+    if settings.environment == "development":
         # Pretty console output for development
         processors = shared_processors + [
             structlog.dev.ConsoleRenderer(colors=True),
@@ -61,7 +61,7 @@ def configure_logging() -> None:
     structlog.configure(
         processors=processors,
         wrapper_class=structlog.make_filtering_bound_logger(
-            getattr(logging, settings.LOG_LEVEL.upper())
+            getattr(logging, settings.log_level.upper())
         ),
         context_class=dict,
         logger_factory=structlog.PrintLoggerFactory(),
@@ -72,7 +72,7 @@ def configure_logging() -> None:
     logging.basicConfig(
         format="%(message)s",
         stream=sys.stdout,
-        level=getattr(logging, settings.LOG_LEVEL.upper()),
+        level=getattr(logging, settings.log_level.upper()),
     )
 
     # Replace standard library logging handlers with structlog
@@ -80,7 +80,7 @@ def configure_logging() -> None:
     handler.setFormatter(
         structlog.stdlib.ProcessorFormatter(
             processor=structlog.dev.ConsoleRenderer(colors=True)
-            if settings.ENVIRONMENT == "development"
+            if settings.environment == "development"
             else structlog.processors.JSONRenderer(),
             foreign_pre_chain=shared_processors,
         )
