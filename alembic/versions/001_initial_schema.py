@@ -131,10 +131,10 @@ def upgrade() -> None:
         sa.Column('client_type', sa.String(length=20), nullable=True),
         sa.Column('created_at', sa.DateTime(timezone=True), nullable=False, server_default=sa.text('now()')),
         sa.ForeignKeyConstraint(['user_id'], ['users.id'], ondelete='CASCADE'),
-        sa.PrimaryKeyConstraint('id')
+        sa.PrimaryKeyConstraint('id', 'created_at')
     )
-    # Convert to hypertable
-    op.execute("SELECT create_hypertable('behavioral_events', 'created_at', chunk_time_interval => INTERVAL '7 days')")
+    # Convert to hypertable (requires created_at in primary key)
+    op.execute("SELECT create_hypertable('behavioral_events', 'created_at', chunk_time_interval => INTERVAL '7 days', migrate_data => true)")
     # Create indexes
     op.create_index('idx_be_user_type', 'behavioral_events', ['user_id', 'event_type', 'created_at'], unique=False)
     op.create_index('idx_be_payload', 'behavioral_events', ['payload'], unique=False, postgresql_using='gin')

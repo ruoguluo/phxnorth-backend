@@ -74,7 +74,7 @@ def hash_password(password: str) -> str:
     Returns:
         Bcrypt hashed password string.
     """
-    return pwd_context.hash(password)
+    return pwd_context.hash(password[:72])
 
 
 def verify_password(plain: str, hashed: str) -> bool:
@@ -87,4 +87,4 @@ def verify_password(plain: str, hashed: str) -> bool:
     Returns:
         True if the password matches, False otherwise.
     """
-    return pwd_context.verify(plain, hashed)
+    return pwd_context.verify(plain[:72], hashed)
