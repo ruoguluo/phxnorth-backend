@@ -33,7 +33,7 @@ def _detect_file_type(file_path: str | Path) -> str:
         file_path: Path to the file
         
     Returns:
-        File type string ('pdf', 'docx', or 'unknown')
+        File type string ('pdf', 'docx', 'txt', or 'unknown')
     """
     path = Path(file_path)
     suffix = path.suffix.lower()
@@ -42,6 +42,8 @@ def _detect_file_type(file_path: str | Path) -> str:
         return 'pdf'
     elif suffix in ('.docx', '.doc'):
         return 'docx'
+    elif suffix == '.txt':
+        return 'txt'
     else:
         return 'unknown'
 
@@ -113,21 +115,26 @@ async def parse_cv(file_path: str | Path, user_id: UUID | None = None) -> dict:
         if file_type == 'unknown':
             raise CVParserError(
                 f"Unsupported file type: {file_path.suffix}",
-                {"supported_types": [".pdf", ".docx", ".doc"]}
+                {"supported_types": [".pdf", ".docx", ".doc", ".txt"]}
             )
         
         # Step 1: Extract text based on file type
-        if file_type == 'pdf':
+        if file_type == 'txt':
+            # Plain text — read directly
+            raw_text = file_path.read_text(encoding="utf-8")
+            file_metadata = {"page_count": 1}
+        elif file_type == 'pdf':
             extraction_result = await extract_pdf_text(file_path)
+            if not extraction_result.get('success'):
+                raise CVParserError(f"Text extraction failed: {extraction_result.get('error', 'Unknown')}")
+            raw_text = extraction_result.get('text', '')
+            file_metadata = extraction_result.get('metadata', {})
         else:  # docx
             extraction_result = await extract_docx_text(file_path)
-        
-        if not extraction_result.get('success'):
-            error_msg = extraction_result.get('error', 'Unknown extraction error')
-            raise CVParserError(f"Text extraction failed: {error_msg}")
-        
-        raw_text = extraction_result.get('text', '')
-        file_metadata = extraction_result.get('metadata', {})
+            if not extraction_result.get('success'):
+                raise CVParserError(f"Text extraction failed: {extraction_result.get('error', 'Unknown')}")
+            raw_text = extraction_result.get('text', '')
+            file_metadata = extraction_result.get('metadata', {})
         
         if not raw_text.strip():
             raise CVParserError("No text content extracted from file")
