@@ -41,15 +41,55 @@ MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB
 
 
 def _parse_date(value: str | date | None) -> date | None:
-    """Convert a date string (YYYY-MM-DD) or date object to a date, or None."""
+    """Convert a date string to a date object.
+
+    Handles: YYYY-MM-DD, YYYY-MM, YYYY, 'January 2022', 'Jan 2022', 'Present', etc.
+    """
     if value is None:
         return None
     if isinstance(value, date):
         return value
+
+    import re
+    s = str(value).strip()
+
+    # "Present" / "Current" → today
+    if s.lower() in ("present", "current", "now", "ongoing"):
+        return None  # treated as current job (no end date)
+
+    # YYYY-MM-DD
     try:
-        return date.fromisoformat(str(value))
+        return date.fromisoformat(s)
     except (ValueError, TypeError):
-        return None
+        pass
+
+    # YYYY-MM (e.g. "2022-01")
+    m = re.match(r"^(\d{4})-(\d{1,2})$", s)
+    if m:
+        return date(int(m.group(1)), int(m.group(2)), 1)
+
+    # "January 2022", "Jan 2022", "Jun 2019"
+    month_names = {
+        "january": 1, "february": 2, "march": 3, "april": 4,
+        "may": 5, "june": 6, "july": 7, "august": 8,
+        "september": 9, "october": 10, "november": 11, "december": 12,
+        "jan": 1, "feb": 2, "mar": 3, "apr": 4,
+        "jun": 6, "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
+    }
+    m = re.match(r"^([A-Za-z]+)\s+(\d{4})$", s)
+    if m:
+        month_str = m.group(1).lower()
+        year = int(m.group(2))
+        month = month_names.get(month_str)
+        if month:
+            return date(year, month, 1)
+
+    # Just a year: "2022"
+    m = re.match(r"^(\d{4})$", s)
+    if m:
+        return date(int(m.group(1)), 1, 1)
+
+    return None
 
 
 async def _persist_parse_result(

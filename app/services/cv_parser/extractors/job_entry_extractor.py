@@ -405,6 +405,72 @@ def _parse_job_entry(entry_text: str) -> dict[str, Any]:
     }
 
 
+# Pattern for "Title | Company | Date Range" or "Title | Company | Location | Date Range"
+# Matches lines like:
+#   Senior Software Engineer | Google | January 2022 - Present
+#   Software Engineer | Microsoft | Redmond, WA | June 2019 - December 2021
+_PIPE_ENTRY_PATTERN = re.compile(
+    r"^(?P<title>[^|]+?)\s*\|\s*(?P<company>[^|]+?)\s*\|"
+    r"\s*(?:(?P<location>[^|]*?)\s*\|\s*)?"
+    r"(?P<dates>(?:(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+\d{4}|\d{4})"
+    r"\s*[-–—]\s*"
+    r"(?:(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+\d{4}|\d{4}|Present|Current))\s*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def _extract_pipe_format_entries(text: str) -> list[dict[str, Any]]:
+    """Extract job entries from 'Title | Company | Dates' pipe-separated format.
+
+    This is a fast path for CVs that use pipe separators. Returns structured
+    entries directly without relying on NER.
+    """
+    entries: list[dict[str, Any]] = []
+    lines = text.split("\n")
+
+    i = 0
+    while i < len(lines):
+        line = lines[i].strip()
+        m = _PIPE_ENTRY_PATTERN.match(line)
+        if m:
+            title = m.group("title").strip()
+            company = m.group("company").strip()
+            location = (m.group("location") or "").strip()
+            dates_str = m.group("dates").strip()
+
+            # Parse date range
+            dr = DATE_RANGE_PATTERN.search(dates_str)
+            start_date = _normalize_date(dr.group("start")) if dr else ""
+            end_date = _normalize_date(dr.group("end")) if dr else ""
+
+            # Collect description lines (bullet points and text until next entry or blank line)
+            desc_lines: list[str] = []
+            i += 1
+            while i < len(lines):
+                dl = lines[i].strip()
+                if not dl:
+                    i += 1
+                    break
+                if _PIPE_ENTRY_PATTERN.match(dl):
+                    break  # next entry — don't consume
+                desc_lines.append(dl.lstrip("- ").lstrip("* "))
+                i += 1
+
+            entries.append({
+                "company_name": company,
+                "job_title": title,
+                "start_date": start_date,
+                "end_date": end_date,
+                "location": location,
+                "description": "\n".join(desc_lines),
+                "confidence": 0.95,
+            })
+        else:
+            i += 1
+
+    return entries
+
+
 async def extract_job_entries(work_experience_text: str) -> dict[str, Any]:
     """
     Extract job entries from work experience section.
@@ -428,8 +494,18 @@ async def extract_job_entries(work_experience_text: str) -> dict[str, Any]:
                 "success": True,
                 "error": None,
             }
+
+        # Fast path: try pipe-separated format first (most reliable)
+        pipe_entries = _extract_pipe_format_entries(work_experience_text)
+        if pipe_entries:
+            return {
+                "entries": pipe_entries,
+                "entry_count": len(pipe_entries),
+                "success": True,
+                "error": None,
+            }
         
-        # Split into individual job entries
+        # Fallback: split into individual job entries using date patterns
         entry_texts = _split_into_entries(work_experience_text)
         
         # Parse each entry
