@@ -10,7 +10,7 @@ from uuid import UUID, uuid4
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, status
-from sqlalchemy import delete
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, get_db, get_kafka_producer
@@ -446,3 +446,54 @@ async def get_cv_status(
         signals_fired=job.get("signals_fired"),
         error=job.get("error"),
     )
+
+
+@router.get(
+    "/users/{user_id}/cv/latest",
+    status_code=status.HTTP_200_OK,
+    summary="Get the latest uploaded CV",
+    description="Returns metadata and raw text of the most recently uploaded CV for a user.",
+)
+async def get_latest_cv(
+    user_id: UUID,
+    _current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Return the latest CV for the given user.
+
+    Args:
+        user_id: Owner user ID from the path.
+
+    Returns:
+        Dict with CV metadata and raw text content.
+
+    Raises:
+        HTTPException 404: If no CV has been uploaded for this user.
+    """
+    result = await db.execute(
+        select(CareerProfile)
+        .where(CareerProfile.user_id == user_id)
+        .order_by(CareerProfile.created_at.desc())
+        .limit(1)
+    )
+    profile = result.scalar_one_or_none()
+
+    if profile is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No CV found for this user",
+        )
+
+    raw_text = profile.raw_text or ""
+
+    return {
+        "id": str(profile.id),
+        "user_id": str(profile.user_id),
+        "source": profile.source,
+        "parsed_at": profile.parsed_at.isoformat() if profile.parsed_at else None,
+        "parser_version": profile.parser_version,
+        "created_at": profile.created_at.isoformat() if profile.created_at else None,
+        "word_count": len(raw_text.split()),
+        "char_count": len(raw_text),
+        "raw_text": raw_text,
+    }
