@@ -2,11 +2,36 @@
 
 from fastapi import APIRouter, Depends
 
-from app.api.deps import get_current_user
+from app.api.deps import get_current_user, get_db
 from app.api.v1 import admin, auth, career, cv, disc, events, health, risk, webhooks
 from app.models.user import User
 
 api_router = APIRouter()
+
+
+@api_router.get("/disc-profile-by-email", tags=["disc"])
+async def get_disc_profile_by_email(
+    email: str,
+    current_user: User = Depends(get_current_user),
+    db=Depends(get_db),
+):
+    """Look up a user by email and return their DISC profile.
+
+    Used by the mentorship frontend to show a mentee's 5D snapshot
+    on the mentor's Review & Structure page.
+    """
+    from fastapi import HTTPException
+    from sqlalchemy import select
+
+    from app.api.v1.disc import get_disc_profile, WindowParam
+    from app.models.user import User as UserModel
+
+    result = await db.execute(select(UserModel).where(UserModel.email == email))
+    user = result.scalar_one_or_none()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found by email")
+
+    return await get_disc_profile(user.id, WindowParam.DAYS_90, current_user, db, None)
 
 
 @api_router.get("/users/me", tags=["users"])
