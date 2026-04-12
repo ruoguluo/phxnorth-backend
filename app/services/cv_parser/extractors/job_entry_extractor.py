@@ -405,25 +405,77 @@ def _parse_job_entry(entry_text: str) -> dict[str, Any]:
     }
 
 
-# Pattern for "Title | Company | Date Range" or "Title | Company | Location | Date Range"
-# Matches lines like:
-#   Senior Software Engineer | Google | January 2022 - Present
-#   Software Engineer | Microsoft | Redmond, WA | June 2019 - December 2021
-_PIPE_ENTRY_PATTERN = re.compile(
-    r"^(?P<title>[^|]+?)\s*\|\s*(?P<company>[^|]+?)\s*\|"
-    r"\s*(?:(?P<location>[^|]*?)\s*\|\s*)?"
-    r"(?P<dates>(?:(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+\d{4}|\d{4})"
-    r"\s*[-–—]\s*"
-    r"(?:(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+\d{4}|\d{4}|Present|Current))\s*$",
-    re.IGNORECASE | re.MULTILINE,
+# Date range fragment used in pipe patterns
+_DATE_RANGE_FRAG = (
+    r"(?:(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+\d{4}|\d{4})"
+    r"\s*[-\u2013\u2014]\s*"
+    r"(?:(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+\d{4}|\d{4}|Present|Current)"
+)
+
+# Generic pipe-line pattern: matches 2 or 3 pipe-separated segments ending with a date range.
+# Could be either:
+#   "Title | Company | Dates"                  (single-line format)
+#   "Company | Location | Dates"               (two-line format, title on preceding line)
+#   "Title | Company | Location | Dates"       (4-segment single-line)
+#   "Company | Location | Extra | Dates"       (rare)
+_PIPE_LINE = re.compile(
+    r"^(?P<seg1>[^|]+?)\s*\|\s*(?P<seg2>[^|]+?)\s*\|"
+    r"\s*(?:(?P<seg3>[^|]*?)\s*\|\s*)?"
+    r"(?P<dates>" + _DATE_RANGE_FRAG + r")\s*$",
+    re.IGNORECASE,
 )
 
 
-def _extract_pipe_format_entries(text: str) -> list[dict[str, Any]]:
-    """Extract job entries from 'Title | Company | Dates' pipe-separated format.
+def _is_title_line(line: str) -> bool:
+    """Check if a line looks like a standalone job title (not a description or header)."""
+    s = line.strip()
+    if not s or len(s) > 100:
+        return False
+    # Must not be a section header (ALL CAPS with no lowercase)
+    if s == s.upper() and len(s) > 3:
+        return False
+    # Must not start with a bullet
+    if s[0] in "-*•":
+        return False
+    # Should be relatively short (job titles are typically < 60 chars)
+    if len(s) > 60:
+        return False
+    # Should not contain pipe (that would be a pipe-format line)
+    if "|" in s:
+        return False
+    return True
 
-    This is a fast path for CVs that use pipe separators. Returns structured
-    entries directly without relying on NER.
+
+def _looks_like_title(text: str) -> bool:
+    """Return True if *text* contains a common job-title keyword."""
+    title_keywords = {
+        "engineer", "manager", "director", "developer", "analyst",
+        "consultant", "specialist", "coordinator", "administrator",
+        "supervisor", "lead", "head", "chief", "vice president", "vp",
+        "president", "ceo", "cto", "cfo", "cio", "coo",
+        "architect", "designer", "strategist", "associate", "intern",
+        "assistant", "representative", "officer", "executive",
+        "scientist", "researcher", "technician", "operator",
+    }
+    lower = text.lower()
+    return any(kw in lower for kw in title_keywords)
+
+
+def _extract_pipe_format_entries(text: str) -> list[dict[str, Any]]:
+    """Extract job entries from pipe-separated CV formats.
+
+    Handles two common layouts:
+
+    1. **Single line** — ``Title | Company | [Location |] Dates``
+       The first segment contains a recognisable job-title keyword.
+
+    2. **Two lines** — the title sits on the preceding line and this line is
+       ``Company | Location | Dates`` (no title keyword in seg1).
+
+    Disambiguation rule: when a pipe-line is found we check whether the
+    preceding non-empty line is a plausible standalone title.  If it is,
+    we treat this line as ``Company | Location | Dates`` (two-line format).
+    Otherwise we treat it as ``Title | Company | Dates`` (single-line).
     """
     entries: list[dict[str, Any]] = []
     lines = text.split("\n")
@@ -431,42 +483,90 @@ def _extract_pipe_format_entries(text: str) -> list[dict[str, Any]]:
     i = 0
     while i < len(lines):
         line = lines[i].strip()
-        m = _PIPE_ENTRY_PATTERN.match(line)
-        if m:
-            title = m.group("title").strip()
-            company = m.group("company").strip()
-            location = (m.group("location") or "").strip()
-            dates_str = m.group("dates").strip()
 
-            # Parse date range
-            dr = DATE_RANGE_PATTERN.search(dates_str)
-            start_date = _normalize_date(dr.group("start")) if dr else ""
-            end_date = _normalize_date(dr.group("end")) if dr else ""
-
-            # Collect description lines (bullet points and text until next entry or blank line)
-            desc_lines: list[str] = []
+        m = _PIPE_LINE.match(line)
+        if not m:
             i += 1
-            while i < len(lines):
-                dl = lines[i].strip()
-                if not dl:
-                    i += 1
-                    break
-                if _PIPE_ENTRY_PATTERN.match(dl):
-                    break  # next entry — don't consume
-                desc_lines.append(dl.lstrip("- ").lstrip("* "))
-                i += 1
+            continue
 
-            entries.append({
-                "company_name": company,
-                "job_title": title,
-                "start_date": start_date,
-                "end_date": end_date,
-                "location": location,
-                "description": "\n".join(desc_lines),
-                "confidence": 0.95,
-            })
+        seg1 = m.group("seg1").strip()
+        seg2 = m.group("seg2").strip()
+        seg3 = (m.group("seg3") or "").strip()
+        dates_str = m.group("dates").strip()
+
+        # --- Decide format: single-line vs two-line ---
+        # Look back for a preceding title line
+        preceding_title = ""
+        for j in range(i - 1, max(i - 4, -1), -1):
+            prev = lines[j].strip() if j >= 0 else ""
+            if not prev:
+                continue
+            if _is_title_line(prev):
+                preceding_title = prev
+            break  # only check the closest non-empty line
+
+        if preceding_title:
+            # Two-line format: Title on preceding line, this line = Company | Location | Dates
+            title = preceding_title
+            if seg3:
+                # seg1=Company, seg2=Location, seg3=extra (rare), dates=dates
+                company = seg1
+                location = seg2
+            else:
+                # seg1=Company, seg2=Location (the common case)
+                company = seg1
+                location = seg2
+            confidence = 0.95
+        elif _looks_like_title(seg1):
+            # Single-line format: Title | Company | [Location |] Dates
+            title = seg1
+            if seg3:
+                company = seg2
+                location = seg3
+            else:
+                company = seg2
+                location = ""
+            confidence = 0.95
         else:
+            # Ambiguous: no preceding title and seg1 doesn't look like a title.
+            # Default to two-line format with empty title.
+            title = ""
+            if seg3:
+                company = seg1
+                location = seg2
+            else:
+                company = seg1
+                location = seg2
+            confidence = 0.60
+
+        dr = DATE_RANGE_PATTERN.search(dates_str)
+        start_date = _normalize_date(dr.group("start")) if dr else ""
+        end_date = _normalize_date(dr.group("end")) if dr else ""
+
+        # Collect description lines following this entry
+        desc_lines: list[str] = []
+        i += 1
+        while i < len(lines):
+            dl = lines[i].strip()
+            if not dl:
+                i += 1
+                break
+            if _PIPE_LINE.match(dl):
+                break  # next pipe-format entry
+            if _is_title_line(dl) and i + 1 < len(lines) and _PIPE_LINE.match(lines[i + 1].strip()):
+                break  # next entry (two-line format)
+            desc_lines.append(dl.lstrip("- ").lstrip("* "))
             i += 1
+
+        entries.append({
+            "company_name": company,
+            "job_title": title,
+            "start_date": start_date,
+            "end_date": end_date,
+            "location": location,
+            "description": "\n".join(desc_lines),
+            "confidence": confidence,
+        })
 
     return entries
 
