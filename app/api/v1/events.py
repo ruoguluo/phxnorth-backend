@@ -91,7 +91,30 @@ async def _publish_events_to_kafka(
     accepted (they were already validated).  A warning is logged on failure
     so operators can detect Kafka issues.
     """
-    if producer is None or not events:
+    if not events:
+        return
+
+    if producer is None:
+        # Synchronous fallback: process events directly without Kafka
+        logger.info(
+            "events_kafka_unavailable_sync_fallback",
+            count=len(events),
+        )
+        from app.services.signal_extractor.worker import process_behavioral_events
+        for event in events:
+            try:
+                await process_behavioral_events(
+                    events=[event.to_validator_dict()],
+                    user_id=str(event.user_id),
+                    window_days=90,
+                )
+            except Exception:
+                logger.warning(
+                    "events_sync_processing_failed",
+                    user_id=str(event.user_id),
+                    event_type=event.event_type,
+                    exc_info=True,
+                )
         return
 
     messages = []
