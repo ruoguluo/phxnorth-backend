@@ -137,11 +137,23 @@ async def _persist_parse_result(
             )
             continue
 
+        # Map seniority_level string to enum if present
+        seniority_str = entry.get("seniority_level", "")
+        seniority_enum = None
+        if seniority_str:
+            from app.models.career import SeniorityLevel
+            try:
+                seniority_enum = SeniorityLevel(seniority_str.lower())
+            except (ValueError, KeyError):
+                pass
+
         job = JobEntry(
             career_profile_id=profile.id,
             user_id=user_id,
             company_name=entry.get("company_name"),
             job_title=entry.get("job_title"),
+            industry=entry.get("industry") or None,
+            seniority_level=seniority_enum,
             start_date=start,
             end_date=_parse_date(entry.get("end_date")),
             duration_months=entry.get("duration_months"),

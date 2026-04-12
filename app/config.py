@@ -45,6 +45,12 @@ class Settings(BaseSettings):
     aws_access_key_id: str = ""
     aws_secret_access_key: str = ""
 
+    # LLM (DeepSeek for CV parsing fallback)
+    deepseek_api_key: str = ""
+    llm_cv_parser_enabled: bool = True
+    llm_model: str = "deepseek-chat"
+    llm_base_url: str = "https://api.deepseek.com"
+
     # Webhooks
     webhook_timeout: int = 10
     webhook_max_retries: int = 5

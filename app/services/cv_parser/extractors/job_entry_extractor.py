@@ -571,13 +571,49 @@ def _extract_pipe_format_entries(text: str) -> list[dict[str, Any]]:
     return entries
 
 
-async def extract_job_entries(work_experience_text: str) -> dict[str, Any]:
+def _needs_llm_fallback(entries: list[dict[str, Any]], text: str = "") -> bool:
+    """Check if rule-based results are too poor and need LLM fallback.
+
+    Returns True when:
+    - No entries found at all
+    - Any entry is missing both job_title and company_name
+    - Average confidence is below 0.7
+    - Text is substantial (500+ chars) but very few entries found (likely missed some)
+    """
+    if not entries:
+        return True
+
+    for entry in entries:
+        if not entry.get("job_title") and not entry.get("company_name"):
+            return True
+
+    avg_confidence = sum(e.get("confidence", 0) for e in entries) / len(entries)
+    if avg_confidence < 0.7:
+        return True
+
+    # Heuristic: substantial text with very few entries is suspicious.
+    # A typical job entry is ~200-400 chars. If the text is long enough
+    # for 3+ entries but we only found 1, the parser likely failed.
+    if text and len(text) > 500 and len(entries) <= 1:
+        return True
+
+    return False
+
+
+async def extract_job_entries(
+    work_experience_text: str,
+    full_cv_text: str = "",
+) -> dict[str, Any]:
     """
     Extract job entries from work experience section.
-    
+
+    Uses rule-based extraction first.  If results are low quality and
+    the DeepSeek LLM is configured, falls back to LLM extraction.
+
     Args:
         work_experience_text: The work experience section text
-        
+        full_cv_text: The full raw CV text (used for LLM fallback)
+
     Returns:
         dict with keys:
         - entries: list[dict] - each with company_name, job_title, start_date,
@@ -588,6 +624,16 @@ async def extract_job_entries(work_experience_text: str) -> dict[str, Any]:
     """
     try:
         if not work_experience_text or not work_experience_text.strip():
+            # No work experience section — try LLM on full text if available
+            if full_cv_text and full_cv_text.strip():
+                llm_entries = await _try_llm_fallback(full_cv_text)
+                if llm_entries:
+                    return {
+                        "entries": llm_entries,
+                        "entry_count": len(llm_entries),
+                        "success": True,
+                        "error": None,
+                    }
             return {
                 "entries": [],
                 "entry_count": 0,
@@ -597,31 +643,46 @@ async def extract_job_entries(work_experience_text: str) -> dict[str, Any]:
 
         # Fast path: try pipe-separated format first (most reliable)
         pipe_entries = _extract_pipe_format_entries(work_experience_text)
-        if pipe_entries:
+        if pipe_entries and not _needs_llm_fallback(pipe_entries, work_experience_text):
             return {
                 "entries": pipe_entries,
                 "entry_count": len(pipe_entries),
                 "success": True,
                 "error": None,
             }
-        
-        # Fallback: split into individual job entries using date patterns
+
+        # Rule-based fallback: split into individual job entries using date patterns
         entry_texts = _split_into_entries(work_experience_text)
-        
-        # Parse each entry
+
         entries = []
         for entry_text in entry_texts:
             if entry_text.strip():
                 entry = _parse_job_entry(entry_text)
                 entries.append(entry)
-        
+
+        # Use whichever rule-based result is better
+        rule_entries = pipe_entries if pipe_entries and len(pipe_entries) >= len(entries) else entries
+
+        # Check if rule-based results need LLM help
+        if _needs_llm_fallback(rule_entries, work_experience_text):
+            llm_text = full_cv_text or work_experience_text
+            llm_entries = await _try_llm_fallback(llm_text)
+            if llm_entries:
+                return {
+                    "entries": llm_entries,
+                    "entry_count": len(llm_entries),
+                    "success": True,
+                    "error": None,
+                }
+
+        # Return rule-based results (even if imperfect, better than nothing)
         return {
-            "entries": entries,
-            "entry_count": len(entries),
+            "entries": rule_entries,
+            "entry_count": len(rule_entries),
             "success": True,
             "error": None,
         }
-        
+
     except Exception as e:
         return {
             "entries": [],
@@ -629,3 +690,21 @@ async def extract_job_entries(work_experience_text: str) -> dict[str, Any]:
             "success": False,
             "error": f"Failed to extract job entries: {str(e)}",
         }
+
+
+async def _try_llm_fallback(text: str) -> list[dict[str, Any]]:
+    """Attempt LLM extraction, returning empty list on any failure."""
+    try:
+        from app.config import get_settings
+
+        settings = get_settings()
+        if not settings.llm_cv_parser_enabled or not settings.deepseek_api_key:
+            return []
+
+        from app.services.cv_parser.extractors.llm_extractor import (
+            extract_job_entries_llm,
+        )
+
+        return await extract_job_entries_llm(text)
+    except Exception:
+        return []

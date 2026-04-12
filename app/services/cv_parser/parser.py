@@ -166,7 +166,10 @@ async def parse_cv(file_path: str | Path, user_id: UUID | None = None) -> dict:
             work_experience_text = raw_text
         
         if work_experience_text:
-            job_extraction_result = await extract_job_entries(work_experience_text)
+            job_extraction_result = await extract_job_entries(
+                work_experience_text,
+                full_cv_text=raw_text,
+            )
             
             if job_extraction_result.get('success'):
                 job_entries = job_extraction_result.get('entries', [])
