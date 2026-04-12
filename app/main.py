@@ -10,6 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.cache.redis_client import RedisCacheService
 from app.config import get_settings
 from app.kafka.producer import KafkaProducerService
+from app.kafka.event_consumer import create_event_consumer
 from app.core.exceptions import (
     AuthenticationException,
     AuthorizationException,
@@ -67,9 +68,25 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         )
         app.state.kafka_producer = None
     
+    # Start Kafka consumer (optional — only if producer started successfully)
+    kafka_consumer = None
+    if kafka_producer is not None:
+        try:
+            kafka_consumer = create_event_consumer(redis=redis_cache)
+            await kafka_consumer.start()
+            logger.info("kafka_behavioral_events_consumer_started")
+        except Exception:
+            logger.warning(
+                "kafka_consumer_unavailable",
+                msg="Kafka consumer failed to start; events will not be processed from Kafka.",
+            )
+            kafka_consumer = None
+    
     yield
     
     # Shutdown
+    if kafka_consumer is not None:
+        await kafka_consumer.stop()
     if kafka_producer is not None:
         await kafka_producer.stop()
     if redis_cache is not None:
