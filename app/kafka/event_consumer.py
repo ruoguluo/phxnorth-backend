@@ -1,21 +1,16 @@
 """Kafka consumer that processes behavioral events through the signal extraction
 and DISC scoring pipeline."""
 
-import asyncio
 import logging
 from typing import Any
 
 from app.cache.disc_cache import DISCProfileCache
 from app.cache.redis_client import RedisCacheService
-from app.database import async_session_factory
 from app.kafka.consumer import KafkaConsumerService
 from app.kafka.topics import KafkaTopic
-from app.models.user import User
 from app.services.signal_extractor.worker import process_behavioral_events
 from app.services.disc_scorer.worker import compute_user_disc_profile
 from app.services.disc_scorer.scorer import WeightedSignal
-
-from sqlalchemy import select
 
 logger = logging.getLogger(__name__)
 
@@ -56,8 +51,7 @@ async def _handle_event(message: dict[str, Any]) -> None:
         weighted_signals = []
         for sig in signals:
             weighted_signals.append(WeightedSignal(
-                dimension=sig.get("dimension", "D"),
-                weight=sig.get("weight", 0.0),
+                signal_type=sig.get("signal_type", event_type),
                 confidence=sig.get("confidence", 0.5),
                 source=sig.get("source", "platform"),
                 timestamp=sig.get("timestamp"),
