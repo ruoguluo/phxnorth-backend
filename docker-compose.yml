@@ -12,6 +12,13 @@ services:
       target: development
     ports:
       - "8000:8000"
+    # Run alembic migrations before starting the API so a fresh `docker compose
+    # up` on an empty database produces a working stack. Without this every
+    # endpoint that touches the database (including auth) returns 500 with
+    # "relation \"users\" does not exist" until migrations are applied by hand.
+    command: >
+      sh -c "poetry run alembic upgrade head &&
+             poetry run uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
     environment:
       - ENVIRONMENT=development
       - DEBUG=true
