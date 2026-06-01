@@ -1,0 +1,14 @@
+# Keep the build context small and avoid copying host-native artifacts.
+.venv/
+venv/
+__pycache__/
+**/__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.git/
+.github/
+*.md
+.env.local
+htmlcov/
+.coverage

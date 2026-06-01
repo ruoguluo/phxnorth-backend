@@ -48,6 +48,7 @@ class Settings(BaseSettings):
     # LLM (DeepSeek for CV parsing fallback)
     deepseek_api_key: str = ""
     llm_cv_parser_enabled: bool = True
+    llm_question_assist_enabled: bool = True
     llm_model: str = "deepseek-chat"
     llm_base_url: str = "https://api.deepseek.com"
 

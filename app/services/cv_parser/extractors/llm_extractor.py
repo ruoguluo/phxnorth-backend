@@ -7,10 +7,11 @@ results or fails to extract any entries from a CV.
 from __future__ import annotations
 
 import json
-import re
 from typing import Any
 
 import structlog
+
+from app.services.llm import LLMUnavailable, chat_json
 
 logger = structlog.get_logger(__name__)
 
@@ -64,50 +65,20 @@ async def extract_job_entries_llm(raw_text: str) -> list[dict[str, Any]]:
 
     settings = get_settings()
 
-    if not settings.deepseek_api_key:
-        logger.warning("llm_extractor.no_api_key", msg="DEEPSEEK_API_KEY not set")
-        return []
-
     if not settings.llm_cv_parser_enabled:
         logger.info("llm_extractor.disabled")
         return []
 
+    # Truncate very long CVs to stay within token limits
+    cv_text = raw_text[:8000] if len(raw_text) > 8000 else raw_text
+
     try:
-        from openai import AsyncOpenAI
-
-        client = AsyncOpenAI(
-            api_key=settings.deepseek_api_key,
-            base_url=settings.llm_base_url,
-        )
-
-        # Truncate very long CVs to stay within token limits
-        cv_text = raw_text[:8000] if len(raw_text) > 8000 else raw_text
-
-        response = await client.chat.completions.create(
-            model=settings.llm_model,
-            messages=[
-                {"role": "system", "content": _SYSTEM_PROMPT},
-                {"role": "user", "content": _USER_PROMPT_TEMPLATE.format(cv_text=cv_text)},
-            ],
-            response_format={"type": "json_object"},
+        data = await chat_json(
+            _SYSTEM_PROMPT,
+            _USER_PROMPT_TEMPLATE.format(cv_text=cv_text),
             temperature=0.1,
             max_tokens=4000,
-            timeout=30.0,
         )
-
-        content = response.choices[0].message.content
-        if not content:
-            logger.warning("llm_extractor.empty_response")
-            return []
-
-        # Parse the JSON response
-        # Strip markdown fences if present (some models add them despite instructions)
-        content = content.strip()
-        if content.startswith("```"):
-            content = re.sub(r"^```(?:json)?\n?", "", content)
-            content = re.sub(r"\n?```$", "", content)
-
-        data = json.loads(content)
 
         entries_raw = data.get("job_entries", [])
         if not isinstance(entries_raw, list):
@@ -147,6 +118,10 @@ async def extract_job_entries_llm(raw_text: str) -> list[dict[str, Any]]:
 
         return entries
 
+    except LLMUnavailable as e:
+        # No API key, disabled, empty/invalid response, or upstream error.
+        logger.info("llm_extractor.unavailable", reason=str(e))
+        return []
     except json.JSONDecodeError as e:
         logger.warning("llm_extractor.json_parse_error", error=str(e))
         return []
