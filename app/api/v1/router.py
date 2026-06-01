@@ -3,7 +3,18 @@
 from fastapi import APIRouter, Depends
 
 from app.api.deps import get_current_user, get_db
-from app.api.v1 import admin, auth, career, cv, disc, events, health, risk, webhooks
+from app.api.v1 import (
+    admin,
+    auth,
+    career,
+    cv,
+    disc,
+    events,
+    health,
+    questions,
+    risk,
+    webhooks,
+)
 from app.models.user import User
 
 api_router = APIRouter()
@@ -68,6 +79,9 @@ api_router.include_router(risk.router, tags=["risk"])
 
 # Include career profile and preference index routes
 api_router.include_router(career.router, tags=["career"])
+
+# Include AI question-structuring routes (FR-03)
+api_router.include_router(questions.router, tags=["questions"])
 
 # Include webhook registration routes
 api_router.include_router(webhooks.router, prefix="/webhooks", tags=["webhooks"])
