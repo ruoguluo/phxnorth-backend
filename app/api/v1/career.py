@@ -14,7 +14,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user, get_db
+from app.api.deps import get_current_user, get_db, resolve_user_id
 from app.api.v1.schemas.career import (
     CareerAnalytics,
     CareerProfileResponse,
@@ -65,29 +65,31 @@ def _label_for_value(value: float, neg_label: str, pos_label: str, neutral: str 
     ),
 )
 async def get_career_profile(
-    user_id: UUID,
+    user_id: str,
     _current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> CareerProfileResponse:
     """Return career profile for the given user from real database data."""
+    uid = resolve_user_id(user_id, _current_user)
+
     # Query job entries
     result = await db.execute(
         select(JobEntryModel)
-        .where(JobEntryModel.user_id == user_id)
+        .where(JobEntryModel.user_id == uid)
         .order_by(JobEntryModel.start_date.desc())
     )
     job_rows = result.scalars().all()
 
     # Query analytics
     result = await db.execute(
-        select(CareerAnalyticsModel).where(CareerAnalyticsModel.user_id == user_id)
+        select(CareerAnalyticsModel).where(CareerAnalyticsModel.user_id == uid)
     )
     analytics_row = result.scalar_one_or_none()
 
     # Query turning points
     result = await db.execute(
         select(CareerTurningPoint)
-        .where(CareerTurningPoint.user_id == user_id)
+        .where(CareerTurningPoint.user_id == uid)
     )
     tp_rows = result.scalars().all()
 
@@ -126,7 +128,7 @@ async def get_career_profile(
         analytics = CareerAnalytics()
 
     return CareerProfileResponse(
-        user_id=user_id,
+        user_id=uid,
         analytics=analytics,
         job_entries=job_entries,
         turning_points=turning_points,
@@ -143,14 +145,16 @@ async def get_career_profile(
     ),
 )
 async def get_preferences(
-    user_id: UUID,
+    user_id: str,
     _current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> PreferencesResponse:
     """Return computed preference indexes derived from career analytics."""
+    uid = resolve_user_id(user_id, _current_user)
+
     # Query analytics
     result = await db.execute(
-        select(CareerAnalyticsModel).where(CareerAnalyticsModel.user_id == user_id)
+        select(CareerAnalyticsModel).where(CareerAnalyticsModel.user_id == uid)
     )
     analytics = result.scalar_one_or_none()
 
@@ -239,7 +243,7 @@ async def get_preferences(
         )
 
     return PreferencesResponse(
-        user_id=user_id,
+        user_id=uid,
         computed_at=datetime.now(timezone.utc),
         indexes=indexes,
     )

@@ -170,6 +170,24 @@ async def get_current_user(
     return user
 
 
+def resolve_user_id(
+    user_id: str,
+    current_user: User = Depends(get_current_user),
+) -> UUID:
+    """Resolve a user_id path parameter.
+
+    Accepts either a UUID string or the literal ``"me"`` which resolves
+    to the current authenticated user's id.
+    """
+    if user_id.lower() == "me":
+        return current_user.id
+    try:
+        return UUID(user_id)
+    except ValueError:
+        from app.core.exceptions import AuthenticationException
+        raise AuthenticationException(message=f"Invalid user_id: {user_id}")
+
+
 async def require_admin(
     current_user: User = Depends(get_current_user),
 ) -> User:

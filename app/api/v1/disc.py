@@ -16,7 +16,7 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user, get_db, get_disc_cache
+from app.api.deps import get_current_user, get_db, get_disc_cache, resolve_user_id
 from app.api.v1.schemas.disc import (
     DISCHistoryEntry,
     DISCProfileHistoryResponse,
@@ -109,7 +109,7 @@ def _dominant_secondary(scores: DISCScores) -> tuple[str, str]:
     ),
 )
 async def get_disc_profile(
-    user_id: UUID,
+    user_id: str,
     window: WindowParam = Query(
         WindowParam.DAYS_90,
         description="Analysis window: 30d, 90d, or lifetime.",
@@ -124,20 +124,21 @@ async def get_disc_profile(
     career analytics and caches it for subsequent requests.  If Redis is
     unavailable the endpoint works normally without caching.
     """
-    uid = str(user_id)
+    uid = resolve_user_id(user_id, current_user)
+    uid_str = str(uid)
 
     # --- Try cache ---
     if disc_cache is not None:
         try:
-            cached = await disc_cache.get_profile(uid, window.value)
+            cached = await disc_cache.get_profile(uid_str, window.value)
             if cached is not None:
                 return DISCProfileResponse(**cached)
         except Exception:
-            logger.warning("disc_cache_read_error", user_id=uid, exc_info=True)
+            logger.warning("disc_cache_read_error", user_id=uid_str, exc_info=True)
 
     # --- Compute from career analytics ---
     result = await db.execute(
-        select(CareerAnalyticsModel).where(CareerAnalyticsModel.user_id == user_id)
+        select(CareerAnalyticsModel).where(CareerAnalyticsModel.user_id == uid)
     )
     analytics = result.scalar_one_or_none()
 
@@ -153,7 +154,7 @@ async def get_disc_profile(
     dominant, secondary = _dominant_secondary(scores)
 
     response = DISCProfileResponse(
-        user_id=user_id,
+        user_id=uid,
         window=window.value,
         computed_at=datetime.now(timezone.utc),
         confidence=round(confidence, 3),
@@ -167,10 +168,10 @@ async def get_disc_profile(
     if disc_cache is not None:
         try:
             await disc_cache.set_profile(
-                uid, window.value, response.model_dump(mode="json"),
+                uid_str, window.value, response.model_dump(mode="json"),
             )
         except Exception:
-            logger.warning("disc_cache_write_error", user_id=uid, exc_info=True)
+            logger.warning("disc_cache_write_error", user_id=uid_str, exc_info=True)
 
     return response
 
@@ -185,7 +186,7 @@ async def get_disc_profile(
     ),
 )
 async def get_disc_profile_history(
-    user_id: UUID,
+    user_id: str,
     window: WindowParam = Query(
         WindowParam.DAYS_90,
         description="Analysis window for each snapshot: 30d, 90d, or lifetime.",
@@ -208,6 +209,8 @@ async def get_disc_profile_history(
     Currently returns deterministic mock history.  A future phase will
     query ``disc_profiles`` filtered by ``computed_at`` range.
     """
+    uid = resolve_user_id(user_id, current_user)
+
     now = datetime.now(timezone.utc)
     end = to_date or now
     start = from_date or (now - timedelta(days=180))
@@ -237,6 +240,6 @@ async def get_disc_profile_history(
         )
 
     return DISCProfileHistoryResponse(
-        user_id=user_id,
+        user_id=uid,
         history=history,
     )

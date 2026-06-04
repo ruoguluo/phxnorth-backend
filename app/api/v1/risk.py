@@ -14,7 +14,7 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user, get_db, get_risk_cache
+from app.api.deps import get_current_user, get_db, get_risk_cache, resolve_user_id
 from app.api.v1.schemas.risk import (
     BehavioralShiftResponse,
     ContradictionResponse,
@@ -67,7 +67,7 @@ def _severity(score: float) -> str:
     ),
 )
 async def get_risk_assessment(
-    user_id: UUID,
+    user_id: str,
     _current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
     risk_cache: RiskCache | None = Depends(get_risk_cache),
@@ -78,22 +78,23 @@ async def get_risk_assessment(
     from career analytics and caches it.  If Redis is unavailable the
     endpoint works normally without caching.
     """
-    uid = str(user_id)
+    uid = resolve_user_id(user_id, _current_user)
+    uid_str = str(uid)
 
     # --- Try cache ---
     if risk_cache is not None:
         try:
-            cached = await risk_cache.get_risk(uid)
+            cached = await risk_cache.get_risk(uid_str)
             if cached is not None:
                 return RiskAssessmentResponse(**cached)
         except Exception:
-            logger.warning("risk_cache_read_error", user_id=uid, exc_info=True)
+            logger.warning("risk_cache_read_error", user_id=uid_str, exc_info=True)
 
     # --- Compute from career analytics ---
     now = datetime.now(timezone.utc)
 
     result = await db.execute(
-        select(CareerAnalyticsModel).where(CareerAnalyticsModel.user_id == user_id)
+        select(CareerAnalyticsModel).where(CareerAnalyticsModel.user_id == uid)
     )
     analytics = result.scalar_one_or_none()
 
@@ -153,7 +154,7 @@ async def get_risk_assessment(
             if item.severity in ("high", "critical"):
                 active_flags.append(
                     RiskFlag(
-                        flag_id=f"flag-{item.category}-{uid[:8]}",
+                        flag_id=f"flag-{item.category}-{uid_str[:8]}",
                         category=item.category,
                         raised_at=now,
                         message=f"{item.category.replace('_', ' ').title()} risk is {item.severity}: {item.description}",
@@ -179,7 +180,7 @@ async def get_risk_assessment(
         active_flags = []
 
     response = RiskAssessmentResponse(
-        user_id=user_id,
+        user_id=uid,
         computed_at=now,
         overall_risk_tier=overall_risk_tier,
         assessments=assessments,
@@ -189,9 +190,9 @@ async def get_risk_assessment(
     # --- Populate cache ---
     if risk_cache is not None:
         try:
-            await risk_cache.set_risk(uid, response.model_dump(mode="json"))
+            await risk_cache.set_risk(uid_str, response.model_dump(mode="json"))
         except Exception:
-            logger.warning("risk_cache_write_error", user_id=uid, exc_info=True)
+            logger.warning("risk_cache_write_error", user_id=uid_str, exc_info=True)
 
     return response
 
@@ -211,7 +212,7 @@ async def get_risk_assessment(
     ),
 )
 async def get_risk_history(
-    user_id: UUID,
+    user_id: str,
     category: str | None = Query(
         default=None,
         description="Risk category to filter by (e.g. 'attrition').",
@@ -229,10 +230,12 @@ async def get_risk_history(
     _current_user: User = Depends(get_current_user),
 ) -> RiskHistoryResponse:
     """Return placeholder risk history for the given user."""
+    uid = resolve_user_id(user_id, _current_user)
+
     now = datetime.now(timezone.utc)
 
     return RiskHistoryResponse(
-        user_id=user_id,
+        user_id=uid,
         category=category,
         history=[
             RiskHistoryEntry(
@@ -259,22 +262,24 @@ async def get_risk_history(
     ),
 )
 async def get_contradiction_analysis(
-    user_id: UUID,
+    user_id: str,
     _current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> ContradictionResponse:
     """Return contradiction analysis computed from DISC-like career signals."""
+    uid = resolve_user_id(user_id, _current_user)
+
     # Import here to avoid circular — we compute DISC inline from analytics
     from app.api.v1.disc import _compute_disc_from_analytics
 
     result = await db.execute(
-        select(CareerAnalyticsModel).where(CareerAnalyticsModel.user_id == user_id)
+        select(CareerAnalyticsModel).where(CareerAnalyticsModel.user_id == uid)
     )
     analytics = result.scalar_one_or_none()
 
     if not analytics:
         return ContradictionResponse(
-            user_id=user_id,
+            user_id=uid,
             contradiction_score=0.0,
             severity_tier="none",
             threshold_exceeded=False,
@@ -329,7 +334,7 @@ async def get_contradiction_analysis(
         severity_tier = "high"
 
     return ContradictionResponse(
-        user_id=user_id,
+        user_id=uid,
         contradiction_score=contradiction_score,
         severity_tier=severity_tier,
         threshold_exceeded=contradiction_score > 0.4,
@@ -354,12 +359,14 @@ async def get_contradiction_analysis(
     ),
 )
 async def get_behavioral_shift(
-    user_id: UUID,
+    user_id: str,
     _current_user: User = Depends(get_current_user),
 ) -> BehavioralShiftResponse:
     """Return placeholder behavioral shift analysis for the given user."""
+    uid = resolve_user_id(user_id, _current_user)
+
     return BehavioralShiftResponse(
-        user_id=user_id,
+        user_id=uid,
         shift_detected=False,
         magnitude=0.05,
         shift_type=None,

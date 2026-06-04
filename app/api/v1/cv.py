@@ -13,7 +13,7 @@ from fastapi import APIRouter, Depends, HTTPException, UploadFile, status
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user, get_db, get_kafka_producer
+from app.api.deps import get_current_user, get_db, get_kafka_producer, resolve_user_id
 from app.api.v1.schemas.cv import CVStatusResponse, CVTextRequest, CVUploadResponse
 from app.kafka.schemas import CVUploadMessage
 from app.kafka.topics import KafkaTopic
@@ -205,7 +205,7 @@ async def _persist_parse_result(
     description="Upload a PDF or DOCX file for parsing. Returns a job ID for status polling.",
 )
 async def upload_cv_file(
-    user_id: UUID,
+    user_id: str,
     file: UploadFile,
     _current_user: User = Depends(get_current_user),
     kafka_producer: KafkaProducerService | None = Depends(get_kafka_producer),
@@ -228,6 +228,7 @@ async def upload_cv_file(
     Raises:
         HTTPException 400: If file type is unsupported or file is too large.
     """
+    uid = resolve_user_id(user_id, _current_user)
     # Validate file extension
     filename = file.filename or ""
     suffix = Path(filename).suffix.lower()
@@ -256,7 +257,7 @@ async def upload_cv_file(
     logger.info(
         "cv.upload.started",
         job_id=str(job_id),
-        user_id=str(user_id),
+        user_id=str(uid),
         filename=filename,
         size=len(contents),
     )
@@ -266,9 +267,9 @@ async def upload_cv_file(
     if kafka_producer is not None:
         try:
             message = CVUploadMessage(
-                user_id=str(user_id),
+                user_id=str(uid),
                 source="upload",
-                s3_key=f"cv-uploads/{user_id}/{job_id}{suffix}",
+                s3_key=f"cv-uploads/{uid}/{job_id}{suffix}",
                 raw_text="",  # Raw text extracted by the consumer
                 filename=filename,
                 event_id=str(job_id),
@@ -276,20 +277,20 @@ async def upload_cv_file(
             await kafka_producer.send(
                 topic=KafkaTopic.RAW_CV_UPLOADS.value,
                 message=message.to_dict(),
-                key=str(user_id),
+                key=str(uid),
             )
             published = True
             logger.info(
                 "cv.upload.published_to_kafka",
                 job_id=str(job_id),
-                user_id=str(user_id),
+                user_id=str(uid),
                 topic=KafkaTopic.RAW_CV_UPLOADS.value,
             )
         except Exception:
             logger.warning(
                 "cv.upload.kafka_publish_failed",
                 job_id=str(job_id),
-                user_id=str(user_id),
+                user_id=str(uid),
                 exc_info=True,
             )
 
@@ -298,13 +299,13 @@ async def upload_cv_file(
         tmp.write(contents)
         tmp.flush()
 
-        result = await parse_cv(file_path=tmp.name, user_id=user_id)
+        result = await parse_cv(file_path=tmp.name, user_id=uid)
 
     parse_success = result.get("success", False)
 
     _job_store[job_id] = {
         "job_id": job_id,
-        "user_id": user_id,
+        "user_id": uid,
         "status": "completed" if parse_success else "failed",
         "parsed_at": datetime.now(timezone.utc) if parse_success else None,
         "entries_found": len(result.get("job_entries", [])),
@@ -316,25 +317,25 @@ async def upload_cv_file(
     # Persist to database if parsing succeeded
     if parse_success:
         try:
-            await _persist_parse_result(db, user_id, "upload", result)
+            await _persist_parse_result(db, uid, "upload", result)
         except Exception:
             logger.exception(
                 "cv.upload.persist_failed",
                 job_id=str(job_id),
-                user_id=str(user_id),
+                user_id=str(uid),
             )
 
     logger.info(
         "cv.upload.finished",
         job_id=str(job_id),
-        user_id=str(user_id),
+        user_id=str(uid),
         success=parse_success,
         entries_found=len(result.get("job_entries", [])),
     )
 
     return CVUploadResponse(
         job_id=job_id,
-        user_id=user_id,
+        user_id=uid,
         status="completed" if parse_success else "failed",
         message="CV parsed successfully" if parse_success else f"CV parsing failed: {result.get('error', 'unknown')}",
     )
@@ -348,7 +349,7 @@ async def upload_cv_file(
     description="Submit raw CV text for parsing. Returns a job ID for status polling.",
 )
 async def upload_cv_text(
-    user_id: UUID,
+    user_id: str,
     payload: CVTextRequest,
     _current_user: User = Depends(get_current_user),
     kafka_producer: KafkaProducerService | None = Depends(get_kafka_producer),
@@ -368,12 +369,14 @@ async def upload_cv_text(
     Returns:
         CVUploadResponse with a job_id for status polling.
     """
+    uid = resolve_user_id(user_id, _current_user)
+
     job_id = uuid4()
 
     logger.info(
         "cv.text.started",
         job_id=str(job_id),
-        user_id=str(user_id),
+        user_id=str(uid),
         text_length=len(payload.raw_text),
     )
 
@@ -382,7 +385,7 @@ async def upload_cv_text(
     if kafka_producer is not None:
         try:
             message = CVUploadMessage(
-                user_id=str(user_id),
+                user_id=str(uid),
                 source="paste",
                 s3_key="",  # No file uploaded — raw text only
                 raw_text=payload.raw_text,
@@ -392,20 +395,20 @@ async def upload_cv_text(
             await kafka_producer.send(
                 topic=KafkaTopic.RAW_CV_UPLOADS.value,
                 message=message.to_dict(),
-                key=str(user_id),
+                key=str(uid),
             )
             published = True
             logger.info(
                 "cv.text.published_to_kafka",
                 job_id=str(job_id),
-                user_id=str(user_id),
+                user_id=str(uid),
                 topic=KafkaTopic.RAW_CV_UPLOADS.value,
             )
         except Exception:
             logger.warning(
                 "cv.text.kafka_publish_failed",
                 job_id=str(job_id),
-                user_id=str(user_id),
+                user_id=str(uid),
                 exc_info=True,
             )
 
@@ -416,13 +419,13 @@ async def upload_cv_text(
         tmp.write(payload.raw_text)
         tmp.flush()
 
-        result = await parse_cv(file_path=tmp.name, user_id=user_id)
+        result = await parse_cv(file_path=tmp.name, user_id=uid)
 
     parse_success = result.get("success", False)
 
     _job_store[job_id] = {
         "job_id": job_id,
-        "user_id": user_id,
+        "user_id": uid,
         "status": "completed" if parse_success else "failed",
         "parsed_at": datetime.now(timezone.utc) if parse_success else None,
         "entries_found": len(result.get("job_entries", [])),
@@ -434,25 +437,25 @@ async def upload_cv_text(
     # Persist to database if parsing succeeded
     if parse_success:
         try:
-            await _persist_parse_result(db, user_id, "paste", result)
+            await _persist_parse_result(db, uid, "paste", result)
         except Exception:
             logger.exception(
                 "cv.text.persist_failed",
                 job_id=str(job_id),
-                user_id=str(user_id),
+                user_id=str(uid),
             )
 
     logger.info(
         "cv.text.finished",
         job_id=str(job_id),
-        user_id=str(user_id),
+        user_id=str(uid),
         success=parse_success,
         entries_found=len(result.get("job_entries", [])),
     )
 
     return CVUploadResponse(
         job_id=job_id,
-        user_id=user_id,
+        user_id=uid,
         status="completed" if parse_success else "failed",
         message="CV parsed successfully" if parse_success else f"CV parsing failed: {result.get('error', 'unknown')}",
     )
@@ -466,7 +469,7 @@ async def upload_cv_text(
     description="Poll the status of a CV parsing job by its job_id.",
 )
 async def get_cv_status(
-    user_id: UUID,
+    user_id: str,
     job_id: UUID,
     _current_user: User = Depends(get_current_user),
 ) -> CVStatusResponse:
@@ -482,12 +485,14 @@ async def get_cv_status(
     Raises:
         HTTPException 404: If the job_id is not found.
     """
+    uid = resolve_user_id(user_id, _current_user)
+
     job = _job_store.get(job_id)
 
-    if job is None or job.get("user_id") != user_id:
+    if job is None or job.get("user_id") != uid:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Job {job_id} not found for user {user_id}",
+            detail=f"Job {job_id} not found for user {uid}",
         )
 
     return CVStatusResponse(
@@ -507,7 +512,7 @@ async def get_cv_status(
     description="Returns metadata and raw text of the most recently uploaded CV for a user.",
 )
 async def get_latest_cv(
-    user_id: UUID,
+    user_id: str,
     _current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
@@ -522,9 +527,11 @@ async def get_latest_cv(
     Raises:
         HTTPException 404: If no CV has been uploaded for this user.
     """
+    uid = resolve_user_id(user_id, _current_user)
+
     result = await db.execute(
         select(CareerProfile)
-        .where(CareerProfile.user_id == user_id)
+        .where(CareerProfile.user_id == uid)
         .order_by(CareerProfile.created_at.desc())
         .limit(1)
     )
