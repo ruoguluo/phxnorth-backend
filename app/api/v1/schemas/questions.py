@@ -14,14 +14,45 @@ from pydantic import BaseModel, Field
 
 
 class AssumedGoal(BaseModel):
-    """The AI's best guess at the mentee's concrete goal."""
+    """The AI's best guess at the mentee's concrete goal.
 
+    Fields are category-dependent — only the relevant subset will be populated:
+    - All categories: country, category, primaryGoal, timeHorizon
+    - education: institution, programLevel, major, targetIntake
+    - career: currentRole, targetRole, industry, yearsExperience
+    - business: companyName, businessArea, challenge, revenue
+    - entrepreneurship: ideaDescription, stage, fundingStatus, targetMarket
+    """
+
+    # Common fields
+    country: str = ""
+    category: str = ""
+    primaryGoal: str = ""
+    timeHorizon: str = ""
+
+    # Education
     institution: str = ""
     programLevel: str = ""
     major: str = ""
     targetIntake: str = ""
-    country: str = ""
-    category: str = ""
+
+    # Career
+    currentRole: str = ""
+    targetRole: str = ""
+    industry: str = ""
+    yearsExperience: str = ""
+
+    # Business
+    companyName: str = ""
+    businessArea: str = ""
+    challenge: str = ""
+    revenue: str = ""
+
+    # Entrepreneurship
+    ideaDescription: str = ""
+    ventureStage: str = ""
+    fundingStatus: str = ""
+    targetMarket: str = ""
 
 
 class StageOption(BaseModel):
